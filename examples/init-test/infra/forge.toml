@@ -1,0 +1,24 @@
+# Multi-service: postgres + redis
+[service.postgres]
+up = "python3 -m http.server ${PORT:-5200}"
+groups = ["infra"]
+
+[service.postgres.env]
+PORT = "5200"
+
+[service.postgres.health]
+http = "/"
+interval = 2
+timeout = 30
+
+[service.redis]
+up = "python3 -m http.server ${PORT:-5201}"
+groups = ["infra"]
+
+[service.redis.env]
+PORT = "5201"
+
+[service.redis.health]
+cmd = "curl -sf http://localhost:${PORT:-5201}/ > /dev/null"
+interval = 2
+timeout = 30

@@ -1,0 +1,359 @@
+use anyhow::Result;
+
+/// Send SIGTERM, wait for timeout, then SIGKILL
+#[cfg(unix)]
+pub async fn stop_process(pid: u32, kill_timeout_secs: u64, treekill: bool) -> Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+
+    let pid_i32 = i32::try_from(pid)
+        .map_err(|_| anyhow::anyhow!("PID {} exceeds i32 range", pid))?;
+
+    let target_pid = if treekill {
+        Pid::from_raw(-pid_i32) // Process group
+    } else {
+        Pid::from_raw(pid_i32)
+    };
+
+    // Send SIGTERM
+    match signal::kill(target_pid, Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => {
+            // Process already dead
+            return Ok(());
+        }
+        Err(Errno::EPERM) => {
+            anyhow::bail!("Permission denied sending SIGTERM to process {}", pid);
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to send SIGTERM to process {}: {}", pid, e);
+        }
+    }
+
+    // Wait for process to exit
+    let timeout = std::time::Duration::from_secs(kill_timeout_secs);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if !is_process_alive(pid) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Force kill
+    tracing::warn!("Process {} did not exit in time, sending SIGKILL", pid);
+    match signal::kill(target_pid, Signal::SIGKILL) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => {
+            // Died between check and kill — that's fine
+            return Ok(());
+        }
+        Err(Errno::EPERM) => {
+            anyhow::bail!("Permission denied sending SIGKILL to process {}", pid);
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to send SIGKILL to process {}: {}", pid, e);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+pub async fn stop_process(pid: u32, kill_timeout_secs: u64, _treekill: bool) -> Result<()> {
+    // On Windows, use taskkill
+    let status = tokio::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T"])
+        .status()
+        .await;
+
+    if let Err(e) = status {
+        anyhow::bail!("Failed to run taskkill for PID {}: {}", pid, e);
+    }
+
+    let timeout = std::time::Duration::from_secs(kill_timeout_secs);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        if !is_process_alive(pid) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Force kill
+    let _ = tokio::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .await;
+
+    Ok(())
+}
+
+/// Check if a process is alive
+#[cfg(unix)]
+pub fn is_process_alive(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+
+    let pid_i32 = match i32::try_from(pid) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    match signal::kill(Pid::from_raw(pid_i32), None) {
+        Ok(()) => true,
+        Err(Errno::EPERM) => true, // Process exists but we lack permission
+        Err(_) => false, // ESRCH or other: process doesn't exist
+    }
+}
+
+#[cfg(windows)]
+pub fn is_process_alive(pid: u32) -> bool {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH", "/FO", "CSV"])
+        .output();
+    match output {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            // CSV format: "name.exe","PID","..."
+            // Check for exact PID match in CSV output
+            s.lines().any(|line| {
+                line.split(',')
+                    .nth(1)
+                    .and_then(|field| field.trim_matches('"').parse::<u32>().ok())
+                    .map(|p| p == pid)
+                    .unwrap_or(false)
+            })
+        }
+        Err(_) => false,
+    }
+}
+
+/// Kill any process currently listening on the given TCP port.
+/// Best-effort: logs warnings on failure but never returns an error.
+pub fn kill_port_listeners(port: u16) {
+    #[cfg(unix)]
+    {
+        // lsof -t -i TCP:{port} -sTCP:LISTEN prints one PID per line
+        let output = match std::process::Command::new("lsof")
+            .args(["-t", &format!("-iTCP:{}", port), "-sTCP:LISTEN"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Ok(pid) = line.trim().parse::<u32>() {
+                use nix::sys::signal::{self, Signal};
+                use nix::unistd::Pid;
+                tracing::warn!(
+                    "Port {} is occupied by PID {}; killing before service start",
+                    port, pid
+                );
+                // Try SIGTERM first, then SIGKILL
+                let _ = signal::kill(Pid::from_raw(-(pid as i32)), Signal::SIGTERM);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if crate::process::platform::is_process_alive(pid) {
+                    let _ = signal::kill(Pid::from_raw(-(pid as i32)), Signal::SIGKILL);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows use netstat + taskkill
+        let _ = port; // suppress unused warning
+    }
+}
+
+/// Detect TCP ports that a process is listening on by inspecting OS state.
+/// Returns an empty vec if the process has no listening ports or detection fails.
+pub fn detect_listening_ports(pid: u32) -> Vec<u16> {
+    detect_ports_impl(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn detect_ports_impl(pid: u32) -> Vec<u16> {
+    // Prefer /proc (no external tools) with lsof as fallback
+    let ports = detect_ports_proc(pid);
+    if !ports.is_empty() {
+        return ports;
+    }
+    detect_ports_lsof(pid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_ports_impl(pid: u32) -> Vec<u16> {
+    detect_ports_lsof(pid)
+}
+
+/// Detect listening ports via `lsof` (works on macOS and Linux).
+fn detect_ports_lsof(pid: u32) -> Vec<u16> {
+    // Use -a (AND logic) to combine -p and -i filters; without -a, lsof treats them as OR
+    // on macOS and returns all internet sockets regardless of PID.
+    let output = match std::process::Command::new("lsof")
+        .args([
+            "-a",
+            "-p",
+            &pid.to_string(),
+            "-iTCP",
+            "-sTCP:LISTEN",
+            "-nP",
+        ])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut ports = Vec::new();
+
+    for line in stdout.lines() {
+        // Regular output format: COMMAND PID USER FD TYPE ... NAME
+        // NAME field looks like "*:8080" or "127.0.0.1:9090" or "[::]:5100"
+        // Skip header line
+        if line.starts_with("COMMAND") {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if let Some(name) = fields.last() {
+            // Strip trailing " (LISTEN)" if present — it shouldn't be since -sTCP:LISTEN filters it
+            if let Some(port_str) = name.rsplit(':').next() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if port > 0 && !ports.contains(&port) {
+                        ports.push(port);
+                    }
+                }
+            }
+        }
+    }
+
+    ports
+}
+
+/// Detect listening ports via Linux /proc filesystem (no external tools needed).
+#[cfg(target_os = "linux")]
+fn detect_ports_proc(pid: u32) -> Vec<u16> {
+    let inodes = collect_socket_inodes(pid);
+    if inodes.is_empty() {
+        return vec![];
+    }
+
+    let mut ports = Vec::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for port in parse_proc_tcp_listen(&content, &inodes) {
+                if !ports.contains(&port) {
+                    ports.push(port);
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Read socket inodes from /proc/{pid}/fd/ symlinks.
+#[cfg(target_os = "linux")]
+fn collect_socket_inodes(pid: u32) -> std::collections::HashSet<u64> {
+    let mut inodes = std::collections::HashSet::new();
+    let fd_dir = format!("/proc/{}/fd", pid);
+    let entries = match std::fs::read_dir(&fd_dir) {
+        Ok(e) => e,
+        Err(_) => return inodes,
+    };
+    for entry in entries.flatten() {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            let s = target.to_string_lossy();
+            // Symlink format: "socket:[123456]"
+            if let Some(rest) = s.strip_prefix("socket:[") {
+                if let Some(inode_str) = rest.strip_suffix(']') {
+                    if let Ok(inode) = inode_str.parse::<u64>() {
+                        inodes.insert(inode);
+                    }
+                }
+            }
+        }
+    }
+    inodes
+}
+
+/// Parse /proc/net/tcp or /proc/net/tcp6 for LISTEN entries matching given inodes.
+#[cfg(target_os = "linux")]
+fn parse_proc_tcp_listen(
+    content: &str,
+    inodes: &std::collections::HashSet<u64>,
+) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in content.lines().skip(1) {
+        // Fields: sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 10 {
+            continue;
+        }
+        // State 0A = LISTEN
+        if fields[3] != "0A" {
+            continue;
+        }
+        let inode: u64 = match fields[9].parse() {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        if !inodes.contains(&inode) {
+            continue;
+        }
+        // local_address: "XXXXXXXX:PPPP" hex — port is after the last colon
+        if let Some(port_hex) = fields[1].rsplit(':').next() {
+            if let Ok(port) = u16::from_str_radix(port_hex, 16) {
+                if port > 0 {
+                    ports.push(port);
+                }
+            }
+        }
+    }
+    ports
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_current_process_is_alive() {
+        let pid = std::process::id();
+        assert!(is_process_alive(pid));
+    }
+
+    #[test]
+    fn test_nonexistent_process_is_not_alive() {
+        // PID 99999999 is extremely unlikely to exist
+        assert!(!is_process_alive(99999999));
+    }
+
+    #[test]
+    fn test_pid_zero_is_not_alive() {
+        // PID 0 is special (kernel), should not panic
+        // On macOS, kill(0, 0) sends to own process group — we just test no panic
+        let _ = is_process_alive(0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_stop_nonexistent_process() {
+        // Should return Ok (ESRCH handled gracefully)
+        let result = stop_process(99999999, 1, false).await;
+        assert!(result.is_ok());
+    }
+}

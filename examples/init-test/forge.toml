@@ -1,0 +1,53 @@
+[workspace]
+name = "init-test"
+description = "Forge example workspace with multi-language services"
+parallel_startup = true
+
+[workspace.zones]
+infra = "infra"
+services = "services"
+web = "web"
+libs = "libs"
+
+[groups.backend]
+description = "All backend services"
+services = ["gateway", "auth", "api", "worker"]
+
+[groups.frontend]
+description = "Frontend applications"
+services = ["portal"]
+
+[groups.infra]
+description = "Infrastructure services"
+services = ["postgres", "redis"]
+
+[commands.migrate]
+description = "Run database migrations"
+mode = "direct"
+run = "echo 'Running migrations...'"
+
+[commands.lint]
+description = "Lint all services"
+mode = "service"
+order = "parallel"
+
+[commands.deploy]
+description = "Deploy all services"
+mode = "service"
+order = "topological"
+fail_fast = true
+
+[[workspace.hints]]
+title = "访问地址"
+items = [
+  { label = "门户",    value = "http://localhost:5100" },
+  { label = "API",     value = "http://localhost:5002" },
+  { label = "Gateway", value = "http://localhost:5010" },
+]
+
+[[workspace.hints]]
+title = "账号密码"
+items = [
+  { label = "管理员",   value = "admin / admin123" },
+  { label = "测试用户", value = "test@example.com / test123" },
+]

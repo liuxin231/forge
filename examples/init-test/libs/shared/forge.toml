@@ -1,0 +1,4 @@
+# Shared library — not a service
+[lib]
+name = "shared"
+description = "Shared utilities and types"

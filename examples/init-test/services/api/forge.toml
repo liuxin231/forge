@@ -1,0 +1,23 @@
+[service]
+up = "python3 server.py"
+build = "echo 'Building api (go build)...'"
+depends_on = ["auth", "postgres"]
+groups = ["backend"]
+
+[service.env]
+PORT = "5002"
+AUTH_URL = "http://localhost:5001"
+DB_URL = "postgres://localhost:5200/api"
+
+[service.health]
+http = "/healthz"
+interval = 2
+timeout = 30
+
+[service.commands.lint]
+run = "echo 'Linting api (golangci-lint)...'"
+description = "Run golangci-lint"
+
+[service.commands.deploy]
+run = "echo 'Deploying api...'"
+description = "Deploy api service"

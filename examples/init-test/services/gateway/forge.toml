@@ -1,0 +1,22 @@
+[service]
+up = "node server.js"
+build = "echo 'Building gateway...'"
+depends_on = ["auth"]
+groups = ["backend"]
+
+[service.env]
+PORT = "5010"
+AUTH_URL = "http://localhost:5001"
+
+[service.health]
+http = "/healthz"
+interval = 2
+timeout = 30
+
+[service.commands.lint]
+run = "echo 'Linting gateway (eslint)...'"
+description = "Run ESLint"
+
+[service.commands.deploy]
+run = "echo 'Deploying gateway...'"
+description = "Deploy gateway service"

@@ -1,0 +1,24 @@
+[service]
+up = "sh worker.sh"
+build = "echo 'Building worker...'"
+depends_on = ["redis"]
+groups = ["backend"]
+autorestart = true
+max_restarts = 3
+restart_delay = 2
+
+[service.env]
+REDIS_URL = "redis://localhost:5201"
+
+[service.health]
+cmd = "test -f /tmp/forge-worker-alive"
+interval = 3
+timeout = 10
+
+[service.commands.lint]
+run = "echo 'Linting worker (shellcheck)...'"
+description = "Run shellcheck"
+
+[service.commands.deploy]
+run = "echo 'Deploying worker...'"
+description = "Deploy worker service"

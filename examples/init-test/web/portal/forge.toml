@@ -1,0 +1,21 @@
+[service]
+up = "node server.js"
+build = "echo 'Building portal (vite build)...'"
+groups = ["frontend"]
+
+[service.env]
+PORT = "5100"
+API_URL = "http://localhost:5002"
+
+[service.health]
+http = "/healthz"
+interval = 2
+timeout = 30
+
+[service.commands.lint]
+run = "echo 'Linting portal (eslint)...'"
+description = "Run ESLint"
+
+[service.commands.deploy]
+run = "echo 'Deploying portal...'"
+description = "Deploy portal"

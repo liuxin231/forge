@@ -1,0 +1,23 @@
+[service]
+up = "python3 server.py"
+build = "echo 'Installing auth dependencies...'"
+depends_on = ["postgres", "redis"]
+groups = ["backend"]
+
+[service.env]
+PORT = "5001"
+DB_URL = "postgres://localhost:5200/auth"
+REDIS_URL = "redis://localhost:5201"
+
+[service.health]
+http = "/healthz"
+interval = 2
+timeout = 30
+
+[service.commands.lint]
+run = "echo 'Linting auth (flake8)...'"
+description = "Run flake8"
+
+[service.commands.deploy]
+run = "echo 'Deploying auth...'"
+description = "Deploy auth service"
