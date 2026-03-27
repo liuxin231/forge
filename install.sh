@@ -363,6 +363,8 @@ ensure_path() {
     [[ -f "$shell_rc" ]] || touch "$shell_rc"
 
     if grep -qF '.forge/bin' "$shell_rc" 2>/dev/null; then
+        # Already written (e.g. previous install), but not active in current shell
+        print_reload_hint "$shell_rc"
         return 0
     fi
 
@@ -371,7 +373,48 @@ ensure_path() {
 
     printf '\n# forge\n%s\n' "$path_line" >> "$shell_rc"
     ok "Added PATH to $shell_rc"
-    warn "Run: source $shell_rc  (or restart terminal)"
+    print_reload_hint "$shell_rc"
+}
+
+# ─── PATH 生效提示（因子 shell 限制无法自动 source）────────────────────────
+
+print_reload_hint() {
+    local shell_rc="$1"
+    echo ""
+    echo -e "  ${BOLD}To use 'fr' in this terminal:${NC}"
+
+    case "${SHELL:-}" in
+        */zsh)
+            echo -e "    ${CYAN}source $shell_rc${NC}"
+            # Warn about zsh plugin managers that may load PATH differently
+            if [[ -f "$HOME/.oh-my-zsh/oh-my-zsh.sh" ]]; then
+                echo ""
+                echo -e "  ${YELLOW}(oh-my-zsh detected: restart terminal if source doesn't work)${NC}"
+            elif [[ -n "${ZINIT_HOME:-}" || -f "$HOME/.zinit/bin/zinit.zsh" ]]; then
+                echo ""
+                echo -e "  ${YELLOW}(zinit detected: restart terminal if source doesn't work)${NC}"
+            fi
+            ;;
+        */bash)
+            echo -e "    ${CYAN}source $shell_rc${NC}"
+            # macOS: bash uses .bash_profile on login shells, .bashrc on interactive
+            if [[ "$(uname -s)" == "Darwin" && "$shell_rc" == *".bash_profile" ]]; then
+                echo ""
+                echo -e "  ${YELLOW}(macOS: .bash_profile is only loaded in login shells — open a new terminal)${NC}"
+            fi
+            ;;
+        */fish)
+            # fish doesn't use 'source' for config reload, uses 'exec fish'
+            echo -e "    ${CYAN}exec fish${NC}  ${YELLOW}(fish reloads config on restart)${NC}"
+            ;;
+        *)
+            echo -e "    Open a new terminal"
+            ;;
+    esac
+
+    echo ""
+    echo -e "  Or open a new terminal."
+    echo ""
 }
 
 # ─── 原子安装（备份 + tmp + mv）──────────────────────────────────────────
