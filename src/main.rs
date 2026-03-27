@@ -10,6 +10,7 @@ mod process;
 mod resolver;
 mod supervisor;
 mod tui;
+mod upgrade;
 
 use anyhow::Result;
 use clap::Parser;
@@ -63,6 +64,9 @@ async fn main() -> Result<()> {
         }
         cli::Command::Init { path } => {
             init::run(path)?;
+        }
+        cli::Command::Upgrade { check } => {
+            upgrade::run(check).await?;
         }
         cli::Command::Supervisor { workspace_root } => {
             supervisor::daemon::run_as_daemon(&workspace_root).await?;

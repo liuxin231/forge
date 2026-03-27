@@ -107,6 +107,13 @@ pub enum Command {
         path: Option<PathBuf>,
     },
 
+    /// Upgrade fr to the latest release
+    Upgrade {
+        /// Only check for updates, do not install
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Internal: run as a background supervisor daemon (not for direct use)
     #[command(hide = true)]
     Supervisor {

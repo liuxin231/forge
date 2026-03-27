@@ -118,9 +118,30 @@ forge 的处理：`fr up / down / restart / logs / ps / build / test / run <cmd>
 
 ## 安装
 
+### 一键安装（推荐）
+
+从 GitHub Releases 下载预编译二进制，无需 Rust：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/liuxin231/forge/main/install.sh | bash
+```
+
+支持平台：macOS（Intel / Apple Silicon）、Linux（x86_64 / aarch64）
+
+安装位置：`~/.forge/bin/fr`，脚本自动配置 PATH。
+
+### 升级
+
+```bash
+fr upgrade          # 升级到最新版本
+fr upgrade --check  # 仅检查是否有新版本，不安装
+```
+
 ### 从源码构建（需要 Rust 1.82+）
 
 ```bash
+git clone https://github.com/liuxin231/forge.git
+cd forge
 cargo install --path .
 ```
 
@@ -128,7 +149,7 @@ cargo install --path .
 
 ```bash
 cargo build --release
-cp target/release/fr ~/.local/bin/   # 或任何在 PATH 中的目录
+cp target/release/fr ~/.local/bin/
 ```
 
 ### 验证
