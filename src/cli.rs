@@ -95,17 +95,56 @@ pub enum Command {
         json: bool,
     },
 
+    /// Inspect project structure or a specific service (machine-friendly)
+    Inspect {
+        /// A specific service name to inspect (empty = whole project)
+        target: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Execute an arbitrary command in a service's context (directory + env)
+    Exec {
+        /// Target service name (required, must be a single service)
+        service: String,
+
+        /// Command to execute (everything after --)
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+
     /// Show dependency graph of services
     Graph {
         /// Target services/domains (empty = all)
         targets: Vec<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Initialize a new forge workspace
     Init {
-        /// Project directory to create (empty = current directory)
+        /// Project directory (empty = current directory)
         path: Option<PathBuf>,
+
+        /// Workspace name (skip interactive prompt)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Workspace description (skip interactive prompt)
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Enable parallel startup (skip interactive prompt)
+        #[arg(long)]
+        parallel: Option<bool>,
     },
+
+    /// Uninstall fr (remove binary, backups, and optionally clean up PATH)
+    Uninstall,
 
     /// Upgrade fr to the latest release
     Upgrade {

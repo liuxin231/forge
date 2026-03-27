@@ -161,32 +161,91 @@ download_from_github() {
         return 1
     fi
 
-    # 下载到临时目录
-    local tmp_dir
-    tmp_dir=$(mktemp -d)
-    trap 'rm -rf "$tmp_dir"' RETURN
-
-    local tmp_archive="$tmp_dir/$asset_name"
+    # 下载到临时目录（结果通过全局变量 GITHUB_BIN_PATH / DOWNLOAD_TMP_DIR 返回）
+    DOWNLOAD_TMP_DIR=$(mktemp -d)
+    local tmp_archive="$DOWNLOAD_TMP_DIR/$asset_name"
     info "Downloading $asset_name..."
 
     if ! http_download "$asset_url" "$tmp_archive"; then
         warn "Download failed"
+        rm -rf "$DOWNLOAD_TMP_DIR"
+        DOWNLOAD_TMP_DIR=""
         return 1
     fi
 
-    # 解压
-    tar -xzf "$tmp_archive" -C "$tmp_dir"
+    # 校验 checksum（如有 checksums.txt）
+    verify_checksum_if_available "$latest_json" "$DOWNLOAD_TMP_DIR" "$asset_name" "$tmp_archive"
 
-    local tmp_bin="$tmp_dir/$BINARY_NAME"
-    if [[ ! -f "$tmp_bin" ]]; then
+    # 解压
+    tar -xzf "$tmp_archive" -C "$DOWNLOAD_TMP_DIR"
+
+    GITHUB_BIN_PATH="$DOWNLOAD_TMP_DIR/$BINARY_NAME"
+    if [[ ! -f "$GITHUB_BIN_PATH" ]]; then
         warn "Binary not found in archive"
+        rm -rf "$DOWNLOAD_TMP_DIR"
+        DOWNLOAD_TMP_DIR=""
         return 1
     fi
 
     # 记录版本标签到环境（供后续显示）
     INSTALLED_VERSION="$tag"
+}
 
-    echo "$tmp_bin"
+# ─── Checksum 校验 ────────────────────────────────────────────────────────
+
+verify_checksum_if_available() {
+    local release_json="$1" tmp_dir="$2" asset_name="$3" archive_path="$4"
+
+    # 需要 sha256sum 或 shasum
+    local sha_cmd=""
+    if command -v sha256sum &>/dev/null; then
+        sha_cmd="sha256sum"
+    elif command -v shasum &>/dev/null; then
+        sha_cmd="shasum -a 256"
+    else
+        warn "sha256sum/shasum not found, skipping checksum verification"
+        return 0
+    fi
+
+    # 查找 checksums.txt 下载链接
+    local checksums_url
+    checksums_url=$(echo "$release_json" | grep "browser_download_url" | grep "checksums.txt" | head -1 \
+        | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
+
+    if [[ -z "$checksums_url" ]]; then
+        warn "checksums.txt not found in release, skipping integrity check"
+        return 0
+    fi
+
+    local checksums_file="$tmp_dir/checksums.txt"
+    if ! http_download "$checksums_url" "$checksums_file" 2>/dev/null; then
+        warn "Failed to download checksums.txt, skipping integrity check"
+        return 0
+    fi
+
+    # 从 checksums.txt 提取期望的 hash
+    local expected_hash
+    expected_hash=$(grep "$asset_name" "$checksums_file" | awk '{print $1}')
+
+    if [[ -z "$expected_hash" ]]; then
+        warn "No checksum entry for $asset_name, skipping integrity check"
+        return 0
+    fi
+
+    # 计算实际 hash
+    local actual_hash
+    actual_hash=$($sha_cmd "$archive_path" | awk '{print $1}')
+
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        err "Checksum mismatch!"
+        err "  Expected: $expected_hash"
+        err "  Actual:   $actual_hash"
+        err "The downloaded file may be corrupted or tampered with."
+        rm -rf "$tmp_dir"
+        exit 1
+    fi
+
+    ok "Checksum verified (SHA256)"
 }
 
 # ─── 查找本地预编译二进制 ──────────────────────────────────────────────────
@@ -364,13 +423,16 @@ do_install() {
     info "Platform: $PLATFORM"
 
     INSTALLED_VERSION=""
+    DOWNLOAD_TMP_DIR=""
+    GITHUB_BIN_PATH=""
     local bin_path=""
 
     if $force_build; then
         bin_path=$(build_from_source)
     else
-        # 1. GitHub Releases
-        if bin_path=$(download_from_github 2>/dev/null); then
+        # 1. GitHub Releases（不用 command substitution，结果通过全局变量返回）
+        if download_from_github 2>/dev/null; then
+            bin_path="$GITHUB_BIN_PATH"
             ok "Downloaded from GitHub Releases"
         # 2. 本地预编译
         elif bin_path=$(find_local_prebuilt); then
@@ -383,6 +445,9 @@ do_install() {
     fi
 
     atomic_install "$bin_path"
+
+    # 清理下载临时目录
+    [[ -n "$DOWNLOAD_TMP_DIR" && -d "$DOWNLOAD_TMP_DIR" ]] && rm -rf "$DOWNLOAD_TMP_DIR"
 
     if "$INSTALL_DIR/$BINARY_NAME" --version &>/dev/null; then
         ok "Version: $("$INSTALL_DIR/$BINARY_NAME" --version)"

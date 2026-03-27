@@ -65,7 +65,10 @@ pub fn spawn_log_collector(
 
 fn push_to_buffer(buffer: &Option<LogBuffer>, line: &LogLine) {
     if let Some(buf) = buffer {
-        if let Ok(mut map) = buf.lock() {
+        if let Ok(mut map) = buf.lock().or_else(|e| {
+            tracing::warn!("Log buffer mutex poisoned, recovering: {}", e);
+            Ok::<_, ()>(e.into_inner())
+        }) {
             let deque = map.entry(line.service.clone()).or_default();
             deque.push_back(line.clone());
             if deque.len() > RING_BUFFER_CAPACITY {
@@ -80,7 +83,10 @@ pub fn read_from_buffer(buffer: &LogBuffer, service: &str, tail: usize) -> Vec<L
     if tail == 0 {
         return vec![];
     }
-    let map = match buffer.lock() {
+    let map = match buffer.lock().or_else(|e| {
+        tracing::warn!("Log buffer mutex poisoned, recovering: {}", e);
+        Ok::<_, ()>(e.into_inner())
+    }) {
         Ok(m) => m,
         Err(_) => return vec![],
     };

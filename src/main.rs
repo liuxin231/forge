@@ -59,11 +59,20 @@ async fn main() -> Result<()> {
         } => {
             cmd_run(&name, targets, parallel, json).await?;
         }
-        cli::Command::Graph { targets } => {
-            cmd_graph(targets)?;
+        cli::Command::Exec { service, cmd } => {
+            cmd_exec(&service, cmd).await?;
         }
-        cli::Command::Init { path } => {
-            init::run(path)?;
+        cli::Command::Inspect { target, json } => {
+            cmd_inspect(target, json)?;
+        }
+        cli::Command::Graph { targets, json } => {
+            cmd_graph(targets, json)?;
+        }
+        cli::Command::Init { path, name, description, parallel } => {
+            init::run(init::InitOptions { path, name, description, parallel })?;
+        }
+        cli::Command::Uninstall => {
+            cmd_uninstall()?;
         }
         cli::Command::Upgrade { check } => {
             upgrade::run(check).await?;
@@ -221,7 +230,17 @@ async fn cmd_down(targets: Vec<String>, json: bool) -> Result<()> {
         resolver::resolve_targets(&project, &targets)?
     };
 
-    let mut client = supervisor::connect_supervisor(&workspace_root).await?;
+    let mut client = match supervisor::connect_supervisor(&workspace_root).await {
+        Ok(c) => c,
+        Err(_) => {
+            if json {
+                println!("{}", serde_json::to_string(&serde_json::json!({"status": "ok", "message": "No services running"}))?);
+            } else {
+                eprintln!("No services are running.");
+            }
+            return Ok(());
+        }
+    };
 
     if json {
         let to_stop = if targets.is_empty() { vec![] } else { resolved };
@@ -276,7 +295,12 @@ async fn cmd_restart(targets: Vec<String>, json: bool) -> Result<()> {
     let project = config::load_project(&workspace_root)?;
     let resolved = resolver::resolve_targets(&project, &targets)?;
 
-    let mut client = supervisor::connect_supervisor(&workspace_root).await?;
+    let mut client = match supervisor::connect_supervisor(&workspace_root).await {
+        Ok(c) => c,
+        Err(_) => {
+            anyhow::bail!("No services are running. Start services with 'fr up' first.");
+        }
+    };
     let response = client
         .send(supervisor::protocol::Request::Restart(resolved))
         .await?;
@@ -295,11 +319,41 @@ async fn cmd_ps(targets: Vec<String>, json: bool) -> Result<()> {
         resolver::resolve_targets(&project, &targets)?
     };
 
-    let mut client = supervisor::connect_supervisor(&workspace_root).await?;
-    let response = client
-        .send(supervisor::protocol::Request::Status(resolved))
-        .await?;
-    output::print_ps_result(&response, json)?;
+    let response = match supervisor::connect_supervisor(&workspace_root).await {
+        Ok(mut client) => client
+            .send(supervisor::protocol::Request::Status(resolved))
+            .await?,
+        Err(_) => {
+            // No supervisor running — build a static "stopped" list from config
+            let service_names: Vec<&String> = if resolved.is_empty() {
+                let mut names: Vec<&String> = project.services.keys().collect();
+                names.sort();
+                names
+            } else {
+                resolved.iter().collect()
+            };
+            let statuses: Vec<supervisor::protocol::ServiceStatus> = service_names
+                .into_iter()
+                .map(|name| {
+                    let port = project
+                        .services
+                        .get(name)
+                        .and_then(|s| s.config.port);
+                    supervisor::protocol::ServiceStatus {
+                        name: name.clone(),
+                        port,
+                        status: supervisor::protocol::ProcessStatus::Stopped,
+                        health: supervisor::protocol::HealthStatus::None,
+                        pid: None,
+                        restarts: 0,
+                    }
+                })
+                .collect();
+            supervisor::protocol::Response::Services(statuses)
+        }
+    };
+
+    output::print_ps_result(&response, json, &project)?;
     if !json {
         output::print_hints(&project.workspace.workspace.hints);
     }
@@ -317,7 +371,12 @@ async fn cmd_logs(
     let project = config::load_project(&workspace_root)?;
     let resolved = resolver::resolve_targets(&project, &targets)?;
 
-    let mut client = supervisor::connect_supervisor(&workspace_root).await?;
+    let mut client = match supervisor::connect_supervisor(&workspace_root).await {
+        Ok(c) => c,
+        Err(_) => {
+            anyhow::bail!("No services are running. Start services with 'fr up' first.");
+        }
+    };
     let response = client
         .send(supervisor::protocol::Request::Logs {
             services: resolved.clone(),
@@ -356,7 +415,135 @@ async fn cmd_run(name: &str, targets: Vec<String>, parallel: bool, json: bool) -
     commands::execute_command(&project, name, &targets, parallel, json).await
 }
 
-fn cmd_graph(targets: Vec<String>) -> Result<()> {
+fn cmd_uninstall() -> Result<()> {
+    use colored::Colorize;
+
+    let current_exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Cannot determine current executable path: {}", e))?;
+
+    let forge_home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
+        .join(".forge");
+
+    eprintln!("{}", "forge uninstaller".bold());
+    eprintln!();
+
+    // Remove binary
+    if current_exe.exists() {
+        std::fs::remove_file(&current_exe)
+            .map_err(|e| anyhow::anyhow!("Failed to remove {}: {} (try sudo?)", current_exe.display(), e))?;
+        eprintln!("{} Removed: {}", "✓".green().bold(), current_exe.display());
+    }
+
+    // Remove backups
+    let backup_dir = forge_home.join("backup");
+    if backup_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+        eprintln!("{} Removed backups", "✓".green().bold());
+    }
+
+    eprintln!();
+    eprintln!("Optional cleanup:");
+    if forge_home.is_dir() {
+        eprintln!("  rm -rf {}", forge_home.display());
+    }
+
+    // Hint about PATH cleanup
+    let home = dirs::home_dir().unwrap_or_default();
+    for rc in &[".zshrc", ".bashrc", ".bash_profile"] {
+        let rc_path = home.join(rc);
+        if rc_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&rc_path) {
+                if content.contains(".forge/bin") {
+                    eprintln!("  Remove '.forge/bin' line from {}", rc_path.display());
+                }
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!("{} forge has been uninstalled.", "✓".green().bold());
+
+    Ok(())
+}
+
+async fn cmd_exec(service: &str, cmd: Vec<String>) -> Result<()> {
+    let workspace_root = find_workspace_root()?;
+    let project = config::load_project(&workspace_root)?;
+
+    // Resolve to exactly one service
+    let resolved = resolver::resolve_targets(&project, &[service.to_string()])?;
+    if resolved.len() != 1 {
+        anyhow::bail!(
+            "'fr exec' requires a single service, but '{}' resolved to {} services: {}",
+            service,
+            resolved.len(),
+            resolved.join(", ")
+        );
+    }
+
+    let svc_name = &resolved[0];
+    let svc = project
+        .services
+        .get(svc_name)
+        .ok_or_else(|| anyhow::anyhow!("Service '{}' not found", svc_name))?;
+
+    let cwd = if let Some(ref custom_cwd) = svc.config.cwd {
+        if std::path::Path::new(custom_cwd).is_absolute() {
+            std::path::PathBuf::from(custom_cwd)
+        } else {
+            svc.dir.join(custom_cwd)
+        }
+    } else {
+        svc.dir.clone()
+    };
+
+    let cmd_str = cmd.join(" ");
+    let status = tokio::process::Command::new("sh")
+        .args(["-c", &cmd_str])
+        .current_dir(&cwd)
+        .envs(&svc.config.env)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::inherit())
+        .status()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to execute command: {}", e))?;
+
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    Ok(())
+}
+
+fn cmd_inspect(target: Option<String>, json: bool) -> Result<()> {
+    let workspace_root = find_workspace_root()?;
+    let project = config::load_project(&workspace_root)?;
+
+    match target.filter(|s| !s.is_empty()) {
+        Some(name) => {
+            let detail = inspect::build_service_inspect(&project, &name)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&detail)?);
+            } else {
+                output::print_service_inspect(&detail);
+            }
+        }
+        None => {
+            let overview = inspect::build_project_inspect(&project)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&overview)?);
+            } else {
+                output::print_project_inspect(&overview);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_graph(targets: Vec<String>, json: bool) -> Result<()> {
     let workspace_root = find_workspace_root()?;
     let project = config::load_project(&workspace_root)?;
     let filtered = if targets.is_empty() {
@@ -379,15 +566,44 @@ fn cmd_graph(targets: Vec<String>) -> Result<()> {
         p.services.retain(|name, _| closure.contains(name));
         p
     };
-    let runtime = inspect::detect_all_runtime_info(&filtered);
+
     let levels = {
         let all: Vec<String> = filtered.services.keys().cloned().collect();
         graph::DependencyGraph::build(&filtered)?
             .topological_levels_for(&all)?
     };
-    let avail_w = terminal_width();
-    let output = tui::dag::render_dag_ansi(&filtered, &runtime, &levels, avail_w);
-    print!("{}", output);
+
+    if json {
+        let mut nodes: Vec<serde_json::Value> = Vec::new();
+        let mut edges: Vec<serde_json::Value> = Vec::new();
+        let mut sorted_names: Vec<&String> = filtered.services.keys().collect();
+        sorted_names.sort();
+        for name in sorted_names {
+            let svc = &filtered.services[name];
+            nodes.push(serde_json::json!({
+                "name": name,
+                "port": svc.config.port,
+                "groups": svc.config.groups,
+            }));
+            for dep in &svc.config.depends_on {
+                edges.push(serde_json::json!({
+                    "from": dep,
+                    "to": name,
+                }));
+            }
+        }
+        let output = serde_json::json!({
+            "nodes": nodes,
+            "edges": edges,
+            "topology": levels,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        let runtime = inspect::detect_all_runtime_info(&filtered);
+        let avail_w = terminal_width();
+        let output = tui::dag::render_dag_ansi(&filtered, &runtime, &levels, avail_w);
+        print!("{}", output);
+    }
     Ok(())
 }
 

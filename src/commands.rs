@@ -124,7 +124,8 @@ async fn execute_service_command(
     let mut results: Vec<CommandResult> = Vec::new();
 
     if order == "parallel" {
-        // Parallel execution
+        // Parallel execution with fail_fast cancellation support
+        let cancel = tokio_util::sync::CancellationToken::new();
         let mut handles = Vec::new();
         for svc_name in &ordered {
             let svc = match project.services.get(svc_name) {
@@ -133,8 +134,12 @@ async fn execute_service_command(
             };
             let cmd_name = name.to_string();
             let root = project.root.clone();
+            let token = cancel.clone();
             handles.push(tokio::spawn(async move {
-                run_service_command(&svc, &cmd_name, &root).await
+                tokio::select! {
+                    result = run_service_command(&svc, &cmd_name, &root) => result,
+                    _ = token.cancelled() => Err(anyhow::anyhow!("cancelled")),
+                }
             }));
         }
 
@@ -155,6 +160,9 @@ async fn execute_service_command(
                 success,
                 message,
             });
+            if !success && fail_fast {
+                cancel.cancel();
+            }
         }
     } else {
         // Sequential / topological execution
@@ -337,6 +345,7 @@ mod tests {
                 depends_on: vec![],
                 health: None,
                 env: HashMap::new(),
+                env_file: None,
                 up: Some("echo".to_string()),
                 down: None,
                 build: None,
@@ -372,6 +381,7 @@ mod tests {
                     ignore_override: None,
                     parallel_startup: true,
                     hints: vec![],
+                    env: HashMap::new(),
                 },
                 groups: HashMap::new(),
                 commands: HashMap::new(),

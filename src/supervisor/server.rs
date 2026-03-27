@@ -239,12 +239,13 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
                 }
 
                 // Wait for health check — pass pid so port can be auto-detected
+                // Pass 0 to use the health.timeout value from config
                 let health_result = health::wait_healthy(
                     name,
                     pid,
                     svc_config.config.port,
                     &svc_config.config.health,
-                    60,
+                    0,
                 )
                 .await;
 
@@ -357,8 +358,11 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
         let _ = platform::stop_process(*pid, *timeout, *treekill).await;
     }
 
-    // Explicit down: supervisor stays running for future up commands.
-    // (Auto-shutdown only happens in spawn_monitor when services die naturally.)
+    // Auto-shutdown supervisor if all services are now stopped.
+    {
+        let mut guard = state.lock().await;
+        trigger_shutdown_if_all_stopped(&mut guard);
+    }
 
     Response::Ok
 }
