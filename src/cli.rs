@@ -9,6 +9,10 @@ pub struct Cli {
     #[arg(short = 'C', long = "directory", global = true)]
     pub directory: Option<PathBuf>,
 
+    /// Verbose output (-v: show command strings, -vv: debug info)
+    #[arg(short = 'v', action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -89,6 +93,18 @@ pub enum Command {
         /// Run in parallel (override config)
         #[arg(long)]
         parallel: bool,
+
+        /// Only show what would run, without executing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum number of concurrent service tasks (default: unlimited)
+        #[arg(long, value_name = "N")]
+        concurrency: Option<usize>,
+
+        /// Only run for services with files changed since this git ref (e.g. HEAD~1, main)
+        #[arg(long, value_name = "GIT_REF")]
+        since: Option<String>,
 
         /// Output as JSON
         #[arg(long)]

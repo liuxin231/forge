@@ -1,3 +1,4 @@
+mod cache;
 mod cli;
 mod commands;
 mod config;
@@ -20,6 +21,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = cli::Cli::parse();
+    let verbose = cli.verbose;
 
     if let Some(dir) = &cli.directory {
         std::env::set_current_dir(dir)
@@ -55,9 +57,12 @@ async fn main() -> Result<()> {
             name,
             targets,
             parallel,
+            dry_run,
+            concurrency,
+            since,
             json,
         } => {
-            cmd_run(&name, targets, parallel, json).await?;
+            cmd_run(&name, targets, parallel, dry_run, concurrency, since, json, verbose).await?;
         }
         cli::Command::Exec { service, cmd } => {
             cmd_exec(&service, cmd).await?;
@@ -93,7 +98,7 @@ async fn main() -> Result<()> {
                     _ => anyhow::bail!("Unknown flag '{}' for command '{}'", arg, name),
                 }
             }
-            cmd_run(name, targets, parallel, json).await?;
+            cmd_run(name, targets, parallel, false, None, None, json, verbose).await?;
         }
     }
 
@@ -409,10 +414,32 @@ async fn cmd_logs(
     Ok(())
 }
 
-async fn cmd_run(name: &str, targets: Vec<String>, parallel: bool, json: bool) -> Result<()> {
+async fn cmd_run(
+    name: &str,
+    targets: Vec<String>,
+    parallel: bool,
+    dry_run: bool,
+    concurrency: Option<usize>,
+    since: Option<String>,
+    json: bool,
+    verbose: u8,
+) -> Result<()> {
     let workspace_root = find_workspace_root()?;
     let project = config::load_project(&workspace_root)?;
-    commands::execute_command(&project, name, &targets, parallel, json).await
+    commands::execute_command(
+        &project,
+        name,
+        &targets,
+        commands::RunOptions {
+            parallel,
+            dry_run,
+            concurrency,
+            since,
+            verbose,
+            json,
+        },
+    )
+    .await
 }
 
 fn cmd_uninstall() -> Result<()> {
