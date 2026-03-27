@@ -6,8 +6,10 @@ use tokio::net::TcpStream;
 
 /// Connection timeout for supervisor client
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Read timeout for supervisor responses
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Default read timeout for quick supervisor responses (status, down, logs)
+const READ_TIMEOUT_DEFAULT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Extended read timeout for operations that involve health checks (up, restart)
+const READ_TIMEOUT_LONG: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub struct SupervisorClient {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
@@ -32,16 +34,21 @@ impl SupervisorClient {
     }
 
     pub async fn send(&mut self, request: Request) -> Result<Response> {
+        let timeout = match &request {
+            Request::Up(_) | Request::Restart(_) => READ_TIMEOUT_LONG,
+            _ => READ_TIMEOUT_DEFAULT,
+        };
+
         let json = serde_json::to_string(&request)? + "\n";
         self.writer.write_all(json.as_bytes()).await?;
 
         let mut line = String::new();
         let n = tokio::time::timeout(
-            READ_TIMEOUT,
+            timeout,
             self.reader.read_line(&mut line),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("Supervisor response timed out after {}s", READ_TIMEOUT.as_secs()))?
+        .map_err(|_| anyhow::anyhow!("Supervisor response timed out after {}s", timeout.as_secs()))?
         .context("Failed to read supervisor response")?;
 
         if n == 0 {

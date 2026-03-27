@@ -59,6 +59,9 @@ pub struct WorkspaceSection {
     /// Custom info panels shown after `fr ps` and `fr up`
     #[serde(default)]
     pub hints: Vec<HintSection>,
+    /// Global environment variables inherited by all services (service-level overrides)
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

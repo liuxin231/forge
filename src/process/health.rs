@@ -24,11 +24,13 @@ pub async fn wait_healthy(
     };
 
     let interval = Duration::from_secs(health.interval.max(1));
-    let timeout = Duration::from_secs(if timeout_secs > 0 {
+    // Use the config timeout if caller passes 0, otherwise use the caller's override
+    let effective_timeout = if timeout_secs > 0 {
         timeout_secs
     } else {
         health.timeout.max(1)
-    });
+    };
+    let timeout = Duration::from_secs(effective_timeout);
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {

@@ -78,17 +78,29 @@ fn get_working_dir(svc: &ResolvedService) -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// Sanitize a service name for use as a filename — replace path separators
+/// and any characters that are problematic in file paths.
+pub fn sanitize_service_name(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' | ' ' | '\n' | '\r' => '-',
+            '.' if name.starts_with('.') => '-', // avoid hidden files
+            c => c,
+        })
+        .collect()
+}
+
 fn write_pid_file(workspace_root: &Path, service_name: &str, pid: u32) -> Result<()> {
     let pid_dir = workspace_root.join(".forge/pids");
     std::fs::create_dir_all(&pid_dir)?;
-    let safe_name = service_name.replace('/', "-");
+    let safe_name = sanitize_service_name(service_name);
     let pid_file = pid_dir.join(format!("{}.pid", safe_name));
     std::fs::write(&pid_file, pid.to_string())?;
     Ok(())
 }
 
 pub fn remove_pid_file(workspace_root: &Path, service_name: &str) {
-    let safe_name = service_name.replace('/', "-");
+    let safe_name = sanitize_service_name(service_name);
     let pid_file = workspace_root.join(format!(".forge/pids/{}.pid", safe_name));
     if let Err(e) = std::fs::remove_file(&pid_file) {
         tracing::debug!("Could not remove PID file {}: {}", pid_file.display(), e);
@@ -211,6 +223,7 @@ mod tests {
                 depends_on: vec![],
                 health: None,
                 env: std::collections::HashMap::new(),
+                env_file: None,
                 up: Some("echo".to_string()),
                 down: None,
                 build: None,
@@ -243,6 +256,7 @@ mod tests {
                 depends_on: vec![],
                 health: None,
                 env: std::collections::HashMap::new(),
+                env_file: None,
                 up: Some("echo".to_string()),
                 down: None,
                 build: None,

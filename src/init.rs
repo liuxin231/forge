@@ -1,47 +1,71 @@
 use anyhow::{bail, Result};
 use colored::Colorize;
-use dialoguer::{Confirm, Input};
 use std::path::PathBuf;
 
-pub fn run(path: Option<PathBuf>) -> Result<()> {
-    println!("{}", "Initializing a new forge workspace...".bold());
-    println!();
+pub struct InitOptions {
+    pub path: Option<PathBuf>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub parallel: Option<bool>,
+}
 
-    // Workspace name — default to path arg or current directory name
-    let default_name = if let Some(p) = &path {
-        p.file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "my-project".to_string())
-    } else {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "my-project".to_string())
+pub fn run(opts: InitOptions) -> Result<()> {
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+
+    // Determine target directory
+    let target_dir = match &opts.path {
+        Some(p) => p.clone(),
+        None => std::env::current_dir()?,
     };
 
-    let name: String = Input::new()
-        .with_prompt("Workspace name")
-        .default(default_name)
-        .interact_text()?;
+    // Resolve workspace name
+    let name = match opts.name {
+        Some(n) => n,
+        None if is_tty => {
+            use dialoguer::Input;
+            let default_name = target_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "my-project".to_string());
+            Input::new()
+                .with_prompt("Workspace name")
+                .default(default_name)
+                .interact_text()?
+        }
+        None => {
+            // Non-interactive: derive from directory name
+            target_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "my-project".to_string())
+        }
+    };
 
-    // Description — optional
-    let description: String = Input::new()
-        .with_prompt("Description (optional)")
-        .allow_empty(true)
-        .default(String::new())
-        .interact_text()?;
+    // Resolve description
+    let description = match opts.description {
+        Some(d) => d,
+        None if is_tty => {
+            use dialoguer::Input;
+            Input::new()
+                .with_prompt("Description (optional)")
+                .allow_empty(true)
+                .default(String::new())
+                .interact_text()?
+        }
+        None => String::new(),
+    };
 
-    // Parallel startup
-    let parallel_startup = Confirm::new()
-        .with_prompt("Enable parallel startup?")
-        .default(true)
-        .interact()?;
-
-    // Determine target directory: explicit path > name-based subdirectory > current dir
-    let target_dir = if let Some(p) = path {
-        p
-    } else {
-        PathBuf::from(&name)
+    // Resolve parallel startup
+    let parallel_startup = match opts.parallel {
+        Some(p) => p,
+        None if is_tty => {
+            use dialoguer::Confirm;
+            Confirm::new()
+                .with_prompt("Enable parallel startup?")
+                .default(true)
+                .interact()?
+        }
+        None => true,
     };
 
     if target_dir.join("forge.toml").exists() {
@@ -67,7 +91,12 @@ pub fn run(path: Option<PathBuf>) -> Result<()> {
     let config_path = target_dir.join("forge.toml");
     std::fs::write(&config_path, &content)?;
 
-    println!();
+    // Auto-add .forge/ to .gitignore
+    ensure_gitignore(&target_dir);
+
+    if is_tty {
+        println!();
+    }
     println!(
         "{} Created {}",
         "✓".green().bold(),
@@ -75,6 +104,24 @@ pub fn run(path: Option<PathBuf>) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// Ensure .forge/ is in .gitignore, creating the file if needed.
+pub fn ensure_gitignore(dir: &std::path::Path) {
+    let gitignore = dir.join(".gitignore");
+    let entry = ".forge/";
+
+    if let Ok(content) = std::fs::read_to_string(&gitignore) {
+        if content.lines().any(|line| line.trim() == entry) {
+            return; // Already present
+        }
+        // Append
+        let separator = if content.ends_with('\n') { "" } else { "\n" };
+        let _ = std::fs::write(&gitignore, format!("{}{}{}\n", content, separator, entry));
+    } else {
+        // Create new
+        let _ = std::fs::write(&gitignore, format!("{}\n", entry));
+    }
 }
 
 fn escape_toml(s: &str) -> String {

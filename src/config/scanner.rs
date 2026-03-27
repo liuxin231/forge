@@ -55,6 +55,9 @@ pub fn load_project(root: &Path) -> Result<ProjectConfig> {
         scan_directory(zone_dir, zone_dir, zone_name, &ignore_patterns, &mut services, 0)?;
     }
 
+    // Resolve environment variables: workspace env → env_file → service env
+    resolve_service_env(&workspace, &mut services);
+
     let project = ProjectConfig {
         workspace,
         services,
@@ -77,6 +80,58 @@ fn build_ignore_patterns(workspace: &WorkspaceConfig) -> Vec<String> {
         patterns.extend(extra.iter().cloned());
     }
     patterns
+}
+
+/// Resolve environment variables for all services:
+/// 1. Start with workspace-level env (lowest priority)
+/// 2. Load env_file if specified
+/// 3. Service-level env overrides everything
+fn resolve_service_env(workspace: &WorkspaceConfig, services: &mut HashMap<String, ResolvedService>) {
+    let workspace_env = &workspace.workspace.env;
+
+    for (_name, svc) in services.iter_mut() {
+        let mut merged = HashMap::new();
+
+        // 1. Workspace env (lowest priority)
+        for (k, v) in workspace_env {
+            merged.insert(k.clone(), v.clone());
+        }
+
+        // 2. env_file (middle priority)
+        if let Some(env_file_path) = &svc.config.env_file {
+            let full_path = if Path::new(env_file_path).is_absolute() {
+                PathBuf::from(env_file_path)
+            } else {
+                svc.dir.join(env_file_path)
+            };
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        let key = key.trim().to_string();
+                        let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                        merged.insert(key, value);
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "env_file '{}' not found for service '{}'",
+                    full_path.display(),
+                    _name
+                );
+            }
+        }
+
+        // 3. Service-level env (highest priority)
+        for (k, v) in &svc.config.env {
+            merged.insert(k.clone(), v.clone());
+        }
+
+        svc.config.env = merged;
+    }
 }
 
 fn get_scan_dirs(root: &Path, workspace: &WorkspaceConfig) -> Vec<(String, PathBuf)> {
@@ -275,6 +330,7 @@ mod tests {
                 ignore_override: None,
                 parallel_startup: true,
                 hints: vec![],
+                env: HashMap::new(),
             },
             groups: HashMap::new(),
             commands: HashMap::new(),
@@ -296,6 +352,7 @@ mod tests {
                 ignore_override: None,
                 parallel_startup: true,
                 hints: vec![],
+                env: HashMap::new(),
             },
             groups: HashMap::new(),
             commands: HashMap::new(),
@@ -316,6 +373,7 @@ mod tests {
                 ignore_override: Some(vec!["only_this".to_string()]),
                 parallel_startup: true,
                 hints: vec![],
+                env: HashMap::new(),
             },
             groups: HashMap::new(),
             commands: HashMap::new(),

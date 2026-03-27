@@ -87,6 +87,10 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
+    /// Path to a .env file to load (relative to service dir or absolute)
+    #[serde(default)]
+    pub env_file: Option<String>,
+
     #[serde(default)]
     pub up: Option<String>,
 

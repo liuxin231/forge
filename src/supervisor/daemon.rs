@@ -37,13 +37,17 @@ pub async fn start_supervisor(workspace_root: &Path, _project: &crate::config::P
     {
         use std::os::unix::process::CommandExt;
         let log_file = std::fs::File::create(forge_dir.join("supervisor.log"))
-            .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+            .or_else(|_| std::fs::File::open("/dev/null"))
+            .context("Failed to open log file or /dev/null")?;
+        let stdout_file = log_file.try_clone()
+            .or_else(|_| std::fs::File::open("/dev/null"))
+            .context("Failed to clone log file handle")?;
         std::process::Command::new(&exe)
             .arg("supervisor")
             .arg("--workspace-root")
             .arg(workspace_root)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::from(log_file.try_clone().unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap())))
+            .stdout(std::process::Stdio::from(stdout_file))
             .stderr(std::process::Stdio::from(log_file))
             .process_group(0)
             .spawn()
