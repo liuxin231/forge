@@ -79,6 +79,9 @@ async fn main() -> Result<()> {
         cli::Command::Uninstall => {
             cmd_uninstall()?;
         }
+        cli::Command::Validate { json } => {
+            cmd_validate(json)?;
+        }
         cli::Command::Upgrade { check } => {
             upgrade::run(check).await?;
         }
@@ -568,6 +571,245 @@ fn cmd_inspect(target: Option<String>, json: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_validate(json: bool) -> Result<()> {
+    use config::validate::{
+        check_port_conflicts, check_service_warnings, detect_unknown_service_fields,
+        detect_unknown_workspace_fields, FileValidationResult, IssueLevel, ValidationIssue,
+    };
+
+    let workspace_root = find_workspace_root()?;
+
+    // ── Step 1: collect all forge.toml paths ─────────────────────────────────
+    let forge_tomls = collect_forge_tomls(&workspace_root)?;
+
+    // ── Step 2: unknown field detection on raw TOML ───────────────────────────
+    let mut file_results: Vec<FileValidationResult> = vec![];
+    for path in &forge_tomls {
+        let relative = path
+            .strip_prefix(&workspace_root)
+            .unwrap_or(path.as_path())
+            .to_path_buf();
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+        let is_workspace = content
+            .parse::<toml::Table>()
+            .map(|t| t.contains_key("workspace"))
+            .unwrap_or(false);
+        let mut issues = if is_workspace {
+            detect_unknown_workspace_fields(&content)
+        } else {
+            detect_unknown_service_fields(&content)
+        };
+
+        // Service-level env_file warning requires knowing the service dir
+        if !is_workspace {
+            let service_dir = path.parent().unwrap_or(workspace_root.as_path());
+            // Parse env_file from raw TOML if present
+            if let Ok(table) = content.parse::<toml::Table>() {
+                if let Some(toml::Value::Table(svc)) = table.get("service") {
+                    let is_single = svc.contains_key("port") || svc.contains_key("up");
+                    if is_single {
+                        let env_file = svc
+                            .get("env_file")
+                            .and_then(|v| v.as_str());
+                        check_service_warnings("(file)", service_dir, env_file, &mut issues);
+                    } else {
+                        for (name, val) in svc {
+                            if let toml::Value::Table(sub) = val {
+                                let env_file =
+                                    sub.get("env_file").and_then(|v| v.as_str());
+                                check_service_warnings(
+                                    name,
+                                    service_dir,
+                                    env_file,
+                                    &mut issues,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        file_results.push(FileValidationResult {
+            relative_path: relative,
+            issues,
+        });
+    }
+
+    // ── Step 3: load project for semantic validation + port conflicts ─────────
+    let mut semantic_issues: Vec<ValidationIssue> = vec![];
+    let load_error: Option<String> = match config::load_project(&workspace_root) {
+        Ok(project) => {
+            // Port conflicts (warnings)
+            semantic_issues.extend(check_port_conflicts(&project));
+            None
+        }
+        Err(e) => Some(e.to_string()),
+    };
+
+    // ── Step 4: output ────────────────────────────────────────────────────────
+    let total_errors: usize = file_results
+        .iter()
+        .flat_map(|f| f.errors())
+        .count()
+        + semantic_issues
+            .iter()
+            .filter(|i| i.level == IssueLevel::Error)
+            .count()
+        + usize::from(load_error.is_some());
+    let total_warnings: usize = file_results
+        .iter()
+        .flat_map(|f| f.warnings())
+        .count()
+        + semantic_issues
+            .iter()
+            .filter(|i| i.level == IssueLevel::Warning)
+            .count();
+
+    if json {
+        let files_json: Vec<serde_json::Value> = file_results
+            .iter()
+            .map(|fr| {
+                serde_json::json!({
+                    "path": fr.relative_path.display().to_string(),
+                    "issues": fr.issues.iter().map(|i| serde_json::json!({
+                        "level": i.level.to_string(),
+                        "path": i.path,
+                        "message": i.message,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+
+        let mut semantic_json: Vec<serde_json::Value> = semantic_issues
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "level": i.level.to_string(),
+                    "path": i.path,
+                    "message": i.message,
+                })
+            })
+            .collect();
+        if let Some(ref err) = load_error {
+            semantic_json.push(serde_json::json!({
+                "level": "error",
+                "path": "",
+                "message": err,
+            }));
+        }
+
+        let output = serde_json::json!({
+            "valid": total_errors == 0,
+            "errors": total_errors,
+            "warnings": total_warnings,
+            "files": files_json,
+            "semantic": semantic_json,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        for fr in &file_results {
+            let path_str = fr.relative_path.display().to_string();
+            if fr.issues.is_empty() {
+                println!("{} ✓", path_str);
+            } else {
+                let e = fr.errors().count();
+                let w = fr.warnings().count();
+                let summary = match (e, w) {
+                    (0, w) => format!("{} warning{}", w, if w == 1 { "" } else { "s" }),
+                    (e, 0) => format!("{} error{}", e, if e == 1 { "" } else { "s" }),
+                    (e, w) => format!(
+                        "{} error{}, {} warning{}",
+                        e,
+                        if e == 1 { "" } else { "s" },
+                        w,
+                        if w == 1 { "" } else { "s" }
+                    ),
+                };
+                println!("{} — {}", path_str, summary);
+                for issue in &fr.issues {
+                    let level_label = match issue.level {
+                        IssueLevel::Error => "  error  ",
+                        IssueLevel::Warning => "  warning",
+                    };
+                    println!("{}  {}  {}", level_label, issue.path, issue.message);
+                }
+            }
+        }
+        if !semantic_issues.is_empty() || load_error.is_some() {
+            println!("semantic checks:");
+            if let Some(ref err) = load_error {
+                println!("  error    (load): {}", err);
+            }
+            for issue in &semantic_issues {
+                let label = match issue.level {
+                    IssueLevel::Error => "  error  ",
+                    IssueLevel::Warning => "  warning",
+                };
+                println!("{}  {}", label, issue.message);
+            }
+        }
+        println!();
+        if total_errors == 0 && total_warnings == 0 {
+            println!("All configuration files are valid.");
+        } else {
+            println!(
+                "{} error{}, {} warning{}",
+                total_errors,
+                if total_errors == 1 { "" } else { "s" },
+                total_warnings,
+                if total_warnings == 1 { "" } else { "s" }
+            );
+        }
+        if total_errors > 0 {
+            anyhow::bail!("Validation failed");
+        }
+    }
+    Ok(())
+}
+
+/// Recursively collect all forge.toml file paths under workspace_root,
+/// respecting the default ignore list.
+fn collect_forge_tomls(root: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    const DEFAULT_IGNORE: &[&str] = &[
+        "node_modules", "target", "dist", ".git", ".next", ".nuxt",
+        ".output", "__pycache__", "vendor", ".turbo", ".nx", ".forge",
+    ];
+    let mut results = vec![];
+    collect_forge_tomls_recursive(root, DEFAULT_IGNORE, &mut results);
+    results.sort();
+    Ok(results)
+}
+
+fn collect_forge_tomls_recursive(
+    dir: &std::path::Path,
+    ignore: &[&str],
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    let forge_toml = dir.join("forge.toml");
+    if forge_toml.is_file() {
+        out.push(forge_toml);
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut subdirs: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    subdirs.sort_by_key(|e| e.file_name());
+    for entry in subdirs {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if ignore.iter().any(|&p| p == name_str.as_ref()) {
+            continue;
+        }
+        collect_forge_tomls_recursive(&entry.path(), ignore, out);
+    }
 }
 
 fn cmd_graph(targets: Vec<String>, json: bool) -> Result<()> {
