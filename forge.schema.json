@@ -1,0 +1,349 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/liuxin231/forge/main/forge.schema.json",
+  "title": "forge.toml",
+  "description": "Schema for forge.toml workspace and service configuration files (forge multi-service orchestration tool). Workspace files contain [workspace] sections; service files contain [service] sections.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "workspace": {
+      "description": "Workspace-level metadata. Present only in the root forge.toml.",
+      "$ref": "#/$defs/WorkspaceSection"
+    },
+    "groups": {
+      "description": "Named groups of services (e.g. [groups.backend]). Used with 'fr up backend'.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/GroupConfig"
+      }
+    },
+    "commands": {
+      "description": "Workspace-level custom commands (e.g. [commands.migrate]). Run with 'fr migrate'.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/CommandConfig"
+      }
+    },
+    "service": {
+      "description": "Service configuration. Use [service] for a single service or [service.name] for multiple services in one file.",
+      "oneOf": [
+        {
+          "description": "Single-service config: [service] with direct fields like up, port, health, etc.",
+          "$ref": "#/$defs/ServiceConfig"
+        },
+        {
+          "description": "Multi-service config: [service.name] for each named service in this directory.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ServiceConfig"
+          }
+        }
+      ]
+    },
+    "lib": {
+      "description": "Library marker. If present, this forge.toml file is a library and will not be treated as a service.",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "WorkspaceSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Project/workspace name. Required.",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of the workspace."
+        },
+        "zones": {
+          "description": "Named scan zones mapping zone-name to directory path (relative to workspace root). Enables multi-root monorepos. E.g. zones = { apps = \"apps\", infra = \"infra\" }",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "ignore": {
+          "description": "Extra directory names or glob patterns to exclude from service discovery (appended to built-in defaults like node_modules, target, .git).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "ignore_override": {
+          "description": "Completely override the default ignore list. Only the specified patterns will be excluded.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "parallel_startup": {
+          "type": "boolean",
+          "description": "Allow independent services to start in parallel during 'fr up' (default: true).",
+          "default": true
+        },
+        "hints": {
+          "description": "Info panels displayed after 'fr up' and 'fr ps'. Useful for showing URLs, credentials, or notes.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/HintSection" }
+        },
+        "env": {
+          "description": "Global environment variables inherited by all services. Service-level env overrides these.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "HintSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Section title for this hint panel."
+        },
+        "items": {
+          "description": "List of label-value pairs to display.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/HintItem" }
+        }
+      }
+    },
+    "HintItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "value"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "Short label (e.g. 'API', 'DB URL')."
+        },
+        "value": {
+          "type": "string",
+          "description": "Value to display (e.g. 'http://localhost:8080')."
+        }
+      }
+    },
+    "GroupConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of this group."
+        },
+        "includes": {
+          "description": "Other group names to include in this group (group composition).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "services": {
+          "description": "Explicit list of service names belonging to this group.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "CommandConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of this command."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Execution mode: 'direct' runs at workspace root, 'service' delegates to each service's own 'commands' entry. Default: 'service'.",
+          "enum": ["direct", "service"],
+          "default": "service"
+        },
+        "run": {
+          "type": "string",
+          "description": "Shell command to run (only used when mode = 'direct')."
+        },
+        "order": {
+          "type": "string",
+          "description": "Execution order for service mode. Default: 'topological'.",
+          "enum": ["topological", "parallel", "sequential"],
+          "default": "topological"
+        },
+        "fail_fast": {
+          "type": "boolean",
+          "description": "Stop on first service failure. Default: true.",
+          "default": true
+        }
+      }
+    },
+    "ServiceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "up": {
+          "type": "string",
+          "description": "Shell command to start the service (e.g. 'cargo run', 'npm start'). Required for runnable services."
+        },
+        "down": {
+          "type": "string",
+          "description": "Shell command to stop the service gracefully. If omitted, forge sends SIGTERM/SIGKILL."
+        },
+        "build": {
+          "type": "string",
+          "description": "Build command for the service (e.g. 'cargo build --release'). Run with 'fr run build'."
+        },
+        "dev": {
+          "type": "string",
+          "description": "Development override command. When set, 'fr up' in dev mode uses this instead of 'up'."
+        },
+        "logs": {
+          "type": "string",
+          "description": "Command to tail logs for this service (used when the service manages its own log files)."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Primary TCP port this service listens on. Used for port conflict detection and status display."
+        },
+        "groups": {
+          "description": "Group names this service belongs to. Used with 'fr up <group>'.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "depends_on": {
+          "description": "Services that must be started and healthy before this service starts.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "health": {
+          "description": "Health check configuration. forge waits until healthy before starting dependents.",
+          "$ref": "#/$defs/HealthConfig"
+        },
+        "env": {
+          "description": "Environment variables for this service. Merged with (and override) workspace-level env.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "env_file": {
+          "type": "string",
+          "description": "Path to a .env file to load (relative to service directory or absolute). Loaded after workspace env, before service env."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for all commands (relative to service directory). Defaults to service directory."
+        },
+        "args": {
+          "type": "string",
+          "description": "Extra arguments appended to the 'up' command."
+        },
+        "autorestart": {
+          "type": "boolean",
+          "description": "Automatically restart the service if it exits unexpectedly. Default: true.",
+          "default": true
+        },
+        "max_restarts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of automatic restarts before giving up. Default: 10.",
+          "default": 10
+        },
+        "restart_delay": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Seconds to wait between restart attempts. Default: 3.",
+          "default": 3
+        },
+        "kill_timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds to wait for graceful shutdown before force-killing. Default: 10.",
+          "default": 10
+        },
+        "treekill": {
+          "type": "boolean",
+          "description": "Kill the entire process group (all child processes) on stop. Default: true.",
+          "default": true
+        },
+        "attach": {
+          "type": "boolean",
+          "description": "Attach this service to the terminal by default during 'fr up' (foreground output). Default: false.",
+          "default": false
+        },
+        "max_memory": {
+          "type": "string",
+          "description": "Memory limit for the service process (e.g. '512M', '2G'). Service is restarted if exceeded."
+        },
+        "commands": {
+          "description": "Custom commands for this service (e.g. [service.commands.migrate]). Run with 'fr run migrate'.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ServiceCommandConfig"
+          }
+        }
+      }
+    },
+    "HealthConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "http": {
+          "type": "string",
+          "description": "HTTP path to poll for health (e.g. '/health', '/healthz'). forge checks http://localhost:<port><path>. Must start with '/'.",
+          "pattern": "^/"
+        },
+        "cmd": {
+          "description": "Shell command or argv array to run as health check. Exit code 0 = healthy.",
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Shell command (passed to sh -c). Supports pipes, env vars, etc."
+            },
+            {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1,
+              "description": "Argv array executed directly (no shell). E.g. [\"pg_isready\", \"-h\", \"localhost\"]."
+            }
+          ]
+        },
+        "interval": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds between health check attempts. Default: 2.",
+          "default": 2
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total seconds to wait for the service to become healthy. Default: 60.",
+          "default": 60
+        }
+      }
+    },
+    "ServiceCommandConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run"],
+      "properties": {
+        "run": {
+          "type": "string",
+          "description": "Shell command to execute for this custom command."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description shown in command listings."
+        },
+        "inputs": {
+          "description": "Glob patterns (relative to service directory) whose file contents determine the cache key. If set, forge skips re-running if inputs are unchanged.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "outputs": {
+          "description": "Paths or globs produced by this command. Declarative metadata for documentation and future tooling.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

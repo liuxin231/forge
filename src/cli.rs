@@ -162,6 +162,13 @@ pub enum Command {
     /// Uninstall fr (remove binary, backups, and optionally clean up PATH)
     Uninstall,
 
+    /// Validate forge.toml configuration files for errors and unknown fields
+    Validate {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Upgrade fr to the latest release
     Upgrade {
         /// Only check for updates, do not install
