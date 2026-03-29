@@ -146,6 +146,13 @@ pub struct ServiceCommandConfig {
     pub run: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Glob patterns (relative to service dir) whose file contents determine the cache key.
+    /// If empty, caching is disabled for this command.
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    /// Paths/globs produced by this command (informational, reserved for future artifact management).
+    #[serde(default)]
+    pub outputs: Vec<String>,
 }
 
 /// Health check command: either a shell string or an argv array.

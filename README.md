@@ -182,8 +182,8 @@ infra = "infra"
 ```toml
 # apps/api/server/forge.toml
 [service]
-type = "rust"
 port = 8080
+up = "cargo run"
 depends_on = ["postgres", "redis"]
 health.http = "/healthz"
 
@@ -200,14 +200,12 @@ run = "sqlx migrate run"
 ```toml
 # infra/forge.toml
 [service.postgres]
-type = "command"
 port = 5432
 up = "docker compose up -d postgres"
 down = "docker compose down postgres"
 health.cmd = "docker compose exec postgres pg_isready"
 
 [service.redis]
-type = "command"
 port = 6379
 up = "docker compose up -d redis"
 down = "docker compose down redis"
@@ -245,16 +243,16 @@ shopify-clone/
 ├── apps/
 │   ├── api/
 │   │   └── server/
-│   │       ├── forge.toml            # type = "rust", port = 8080
+│   │       ├── forge.toml            # port = 8080, health.http = "/healthz"
 │   │       ├── Cargo.toml
 │   │       └── src/
 │   ├── worker/
-│   │   ├── forge.toml                # type = "rust", port = 9000
+│   │   ├── forge.toml                # port = 9000, depends_on = [...]
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   └── web/
 │       └── app/
-│           ├── forge.toml            # type = "node", port = 3000
+│           ├── forge.toml            # port = 3000, depends_on = ["api/server"]
 │           ├── package.json
 │           └── src/
 ├── infra/
@@ -296,7 +294,6 @@ order = "topological"
 
 ```toml
 [service]
-type = "rust"
 port = 8080
 depends_on = ["postgres", "redis"]
 health.http = "/healthz"
@@ -322,7 +319,6 @@ run = "cargo clippy -- -D warnings"
 
 ```toml
 [service]
-type = "rust"
 port = 9000
 depends_on = ["postgres", "redis"]
 health.http = "/health"
@@ -338,7 +334,6 @@ QUEUE_CONCURRENCY = "4"
 
 ```toml
 [service]
-type = "node"
 port = 3000
 depends_on = ["api/server"]
 health.http = "/"
@@ -355,14 +350,12 @@ run = "next lint"
 
 ```toml
 [service.postgres]
-type = "command"
 port = 5432
 up = "docker compose -f docker-compose.yml up -d postgres"
 down = "docker compose -f docker-compose.yml stop postgres"
 health.cmd = "docker compose -f docker-compose.yml exec -T postgres pg_isready -U postgres"
 
 [service.redis]
-type = "command"
 port = 6379
 up = "docker compose -f docker-compose.yml up -d redis"
 down = "docker compose -f docker-compose.yml stop redis"
@@ -575,7 +568,7 @@ $ fr down
 
 | 输入 | 解析为 |
 |------|--------|
-| *（不指定）* | 所有 `role = "service"` 的服务 |
+| *（不指定）* | 所有已发现的服务 |
 | `api` | `api/` 下所有服务 —— `api/server`、`api/worker`、... |
 | `api/server` | 精确匹配 |
 | `postgres` | 精确匹配（infra 服务） |
@@ -633,8 +626,6 @@ order = "topological"              # topological | parallel | sequential
 
 ```toml
 [service]
-type = "rust"                      # "rust" | "node" | "go" | "java" | "command"
-role = "service"                   # "service"（默认）| "cli"
 port = 8080
 depends_on = ["postgres", "redis"]
 groups = ["backend", "core"]
@@ -659,26 +650,29 @@ run = "cargo clippy"
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `type` | string | `"command"` | 服务类型：`rust`、`node`、`go`、`java`、`command` |
-| `role` | string | `"service"` | `"service"`（常驻进程）或 `"cli"`（仅构建，`fr up` 不启动） |
+| `up` | string | — | 启动命令（任意语言、任意工具） |
+| `down` | string | — | 停止命令（省略则 forge 发 SIGTERM/SIGKILL） |
 | `port` | u16 | — | 声明端口，用于健康检查、冲突检测、状态展示 |
 | `depends_on` | string[] | `[]` | 依赖的服务列表，必须健康后才启动当前服务 |
-| `groups` | string[] | `[]` | 标签组，用于分组操作 |
+| `groups` | string[] | `[]` | 标签组，用于 `fr up <group>` 分组操作 |
 | `attach` | bool | `false` | `fr up --attach` 时是否默认前台运行 |
-| `health.http` | string | — | HTTP 健康检查路径 |
-| `health.cmd` | string | — | 命令健康检查（exit 0 = 健康） |
+| `health.http` | string | — | HTTP 健康检查路径（需以 `/` 开头） |
+| `health.cmd` | string \| string[] | — | 命令健康检查（exit 0 = 健康） |
+| `health.interval` | u64 | `2` | 检查间隔（秒） |
+| `health.timeout` | u64 | `60` | 等待健康的总超时（秒） |
 | `env` | table | `{}` | 启动时注入的环境变量 |
-| `up` | string | — | 覆盖启动命令 |
-| `down` | string | — | 覆盖停止命令 |
+| `env_file` | string | — | 加载 .env 文件（相对于服务目录） |
 | `dev` | string | — | 开发模式启动命令 |
-| `build` | string | — | 构建命令 |
+| `build` | string | — | 构建命令（通过 `fr run build` 调用） |
+| `logs` | string | — | 日志查看命令（服务自管日志时使用） |
 | `cwd` | string | forge.toml 所在目录 | 工作目录 |
-| `args` | string | — | 传递给服务进程的参数 |
+| `args` | string | — | 追加给 `up` 命令的参数 |
 | `autorestart` | bool | `true` | 崩溃后自动重启 |
 | `max_restarts` | u32 | `10` | 最大连续重启次数 |
 | `restart_delay` | u64 | `3` | 重启间隔（秒） |
 | `kill_timeout` | u64 | `10` | SIGTERM 超时后发 SIGKILL（秒） |
 | `treekill` | bool | `true` | 停止时杀掉整个进程树 |
+| `max_memory` | string | — | 内存上限（如 `512M`、`2G`），超限自动重启 |
 | `commands.*` | table | — | 自定义指令，通过 `fr run <name>` 调用 |
 
 </details>
@@ -764,6 +758,218 @@ fr up web/app
 ```
 
 supervisor 是**项目级**的 —— 每个项目独立一个。`fr up` 时启动，`fr down` 所有服务停止后自动退出。没有全局守护进程。
+
+---
+
+## 工程架构最佳实践
+
+### 推荐目录结构
+
+```
+my-project/
+│
+├── forge.toml                  # 工作区根配置（唯一必须在根目录的文件）
+├── forge.schema.json           # 字段 schema，供 IDE / AI 工具验证配置
+│
+├── apps/                       # 产品服务
+│   ├── api/
+│   │   ├── forge.toml          # [service] up/port/health/depends_on
+│   │   └── src/
+│   ├── worker/
+│   │   ├── forge.toml
+│   │   └── src/
+│   └── web/
+│       ├── forge.toml
+│       └── src/
+│
+├── infra/                      # 基础设施（通常 multi-service 合一个文件）
+│   ├── forge.toml              # [service.postgres] [service.redis] ...
+│   └── docker-compose.yml
+│
+└── packages/                   # 共享库（不运行，不需要 forge.toml）
+    ├── ui/
+    └── utils/
+```
+
+**原则：`forge.toml` 只放在有可运行进程或多服务声明的目录下。** 纯共享库、工具函数包无需添加。
+
+---
+
+### zones 分区（大型 Monorepo）
+
+当项目按职责分层时，用 `zones` 让 forge 只扫描有意义的区域，避免误扫：
+
+```toml
+# forge.toml
+[workspace]
+name = "my-platform"
+
+[workspace.zones]
+apps  = "apps"       # 产品服务
+infra = "infra"      # 基础设施
+tools = "tools"      # 内部 CLI 工具（可选）
+```
+
+```
+my-platform/
+├── forge.toml
+├── apps/
+│   ├── gateway/forge.toml       # 服务名 → gateway
+│   ├── iam/
+│   │   ├── api/forge.toml       # 服务名 → iam/api
+│   │   └── worker/forge.toml    # 服务名 → iam/worker
+│   └── billing/forge.toml       # 服务名 → billing
+├── infra/
+│   └── forge.toml               # postgres, redis, kafka
+└── tools/
+    └── cli/forge.toml           # 内部工具（有 up 命令时才被发现）
+```
+
+服务名由路径自动推导，`zone 根目录` 作为前缀截断点：
+- `apps/iam/api/` → `iam/api`
+- `infra/forge.toml [service.postgres]` → `postgres`
+
+---
+
+### 依赖关系的典型拓扑
+
+```
+Level 0  postgres ──── redis ──── kafka        ← 基础设施，无依赖
+             │            │
+Level 1   iam/api ─── billing                  ← 核心服务，依赖基础设施
+               │
+Level 2    gateway                             ← 入口服务，依赖核心服务
+               │
+Level 3     web/app                            ← 前端，依赖 API 入口
+```
+
+```toml
+# apps/gateway/forge.toml
+[service]
+port = 8000
+up = "cargo run"
+depends_on = ["iam/api", "billing"]
+health.http = "/health"
+```
+
+forge 从这个声明自动推导启动顺序，无需手动排列。
+
+---
+
+### 多 Rust 服务项目
+
+每个服务独立构建，通过 `path` 引用共享 crate，根目录只有 `forge.toml`：
+
+```
+my-project/
+├── forge.toml
+│
+├── apps/
+│   ├── api/
+│   │   ├── forge.toml
+│   │   ├── Cargo.toml          # path deps 指向 libs/rust/*
+│   │   └── src/
+│   └── worker/
+│       ├── forge.toml
+│       ├── Cargo.toml
+│       └── src/
+│
+└── libs/rust/
+    ├── core/Cargo.toml         # 共享 crate，无 forge.toml
+    └── crypto/Cargo.toml
+```
+
+```toml
+# apps/api/Cargo.toml
+[dependencies]
+myapp-core   = { path = "../../libs/rust/core" }
+myapp-crypto = { path = "../../libs/rust/crypto" }
+```
+
+```toml
+# apps/api/forge.toml
+[service]
+port = 8080
+up = "cargo run"
+depends_on = ["postgres"]
+health.http = "/healthz"
+```
+
+> 如果需要共享 `Cargo.lock`（防止同一外部 crate 在各服务间版本漂移），或希望从根目录跑 `cargo test`，再在根目录添加 `Cargo.toml [workspace]`。
+
+---
+
+### 多前端服务项目
+
+通过 `tsconfig.json` 的 `paths` 直接指向共享库源码，根目录只有 `forge.toml`：
+
+```
+my-project/
+├── forge.toml
+│
+├── apps/
+│   ├── web/
+│   │   ├── forge.toml          # [service] up = "pnpm dev"
+│   │   ├── tsconfig.json       # extends ../../libs/ts/tsconfig.base.json
+│   │   └── package.json
+│   └── admin/
+│       ├── forge.toml
+│       ├── tsconfig.json
+│       └── package.json
+│
+└── libs/ts/
+    ├── tsconfig.base.json      # 定义 paths 别名
+    └── ui/src/                 # 共享组件源码，无 forge.toml
+```
+
+```json
+// libs/ts/tsconfig.base.json
+{
+  "compilerOptions": {
+    "paths": {
+      "@myapp/ui": ["libs/ts/ui/src/index.ts"]
+    }
+  }
+}
+```
+
+import 直接指向源码，构建工具实时编译，不需要 watch 进程，也不需要 `pnpm-workspace.yaml`。
+
+> 如果需要跨 app 统一安装依赖（`pnpm -r install`）或者共享库需要独立编译步骤，再在根目录添加 `pnpm-workspace.yaml` 和 `package.json`。
+
+---
+
+### 与 AI 工具协作
+
+使用 Claude Code、Cursor 等 AI 工具时，推荐的工作方式：
+
+```bash
+# AI 可以调用这些命令了解项目
+fr inspect --json          # 所有服务的完整拓扑
+fr ps --json               # 当前运行状态
+fr validate                # 检查配置文件是否有错误
+fr graph                   # 依赖关系图
+```
+
+`forge.schema.json` 放在项目根目录后，IDE 和 AI 会用它验证 `forge.toml` 的字段合法性。配置 taplo（TOML 语言服务器）后可获得实时校验和自动补全：
+
+```toml
+# .taplo.toml（放在项目根目录）
+[schema]
+path = "forge.schema.json"
+include = ["forge.toml", "**/forge.toml"]
+```
+
+如果 AI 生成的 `forge.toml` 包含未知字段，运行 `fr validate` 立即发现：
+
+```
+$ fr validate
+apps/api/forge.toml — 1 error
+  error   service.type    unknown field 'type'
+  error   service.health.command  unknown field 'command' — did you mean 'cmd'?
+
+1 error, 0 warnings
+```
 
 ---
 
