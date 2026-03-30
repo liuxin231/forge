@@ -4,7 +4,7 @@ pub mod validate;
 pub mod workspace;
 
 pub use scanner::load_project;
-pub use service::ServiceConfig;
+pub use service::{ServiceConfig, ServiceMode};
 pub use workspace::WorkspaceConfig;
 
 use std::collections::HashMap;

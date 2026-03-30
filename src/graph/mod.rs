@@ -221,6 +221,7 @@ mod tests {
                 treekill: true,
                 attach: false,
                 max_memory: None,
+                mode: crate::config::ServiceMode::Service,
                 commands: HashMap::new(),
             },
             dir: PathBuf::from("/tmp"),

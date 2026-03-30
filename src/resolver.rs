@@ -71,7 +71,7 @@ fn resolve_single_target(project: &ProjectConfig, target: &str) -> Result<Vec<St
 mod tests {
     use super::*;
     use crate::config::{
-        service::ServiceConfig, workspace::{WorkspaceConfig, WorkspaceSection},
+        service::{ServiceConfig, ServiceMode}, workspace::{WorkspaceConfig, WorkspaceSection},
         ProjectConfig, ResolvedService,
     };
     use std::collections::HashMap;
@@ -101,6 +101,7 @@ mod tests {
                 treekill: true,
                 attach: false,
                 max_memory: None,
+                mode: ServiceMode::Service,
                 commands: HashMap::new(),
             },
             dir: PathBuf::from("/tmp"),

@@ -273,6 +273,12 @@
           "type": "string",
           "description": "Memory limit for the service process (e.g. '512M', '2G'). Service is restarted if exceeded."
         },
+        "mode": {
+          "type": "string",
+          "enum": ["service", "oneshot"],
+          "default": "service",
+          "description": "Process lifecycle mode. 'service' (default): long-running process, restarted on exit. 'oneshot': launcher exits immediately after starting an external daemon (e.g. docker compose up -d); forge keeps the service marked as running and relies on the health check."
+        },
         "commands": {
           "description": "Custom commands for this service (e.g. [service.commands.migrate]). Run with 'fr run migrate'.",
           "type": "object",
