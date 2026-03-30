@@ -1,7 +1,7 @@
 use crate::config::ProjectConfig;
 use crate::supervisor::protocol::{HealthStatus, ProcessStatus, ServiceStatus};
 use anyhow::Result;
-use comfy_table::{presets, Attribute, Cell, Color, Table};
+use comfy_table::{presets, Attribute, Cell, Color, ContentArrangement, Table};
 use std::collections::HashMap;
 
 fn status_cell(status: &ProcessStatus) -> Cell {
@@ -24,7 +24,8 @@ fn health_cell(health: &HealthStatus) -> Cell {
 
 pub fn print_ps_table(statuses: &[ServiceStatus], project: &ProjectConfig) -> Result<()> {
     let mut table = Table::new();
-    table.load_preset(presets::UTF8_FULL_CONDENSED);
+    table.load_preset(presets::UTF8_BORDERS_ONLY);
+    table.set_content_arrangement(ContentArrangement::Disabled);
     table.set_header(vec![
         "SERVICE", "PORT", "STATUS", "HEALTH", "PID", "RESTART", "DEPENDS ON", "DIR",
     ]);
@@ -81,7 +82,8 @@ pub fn print_ps_table(statuses: &[ServiceStatus], project: &ProjectConfig) -> Re
 /// Services table for `fr inspect` — shows service name, port, depends_on, dir.
 pub fn print_inspect_services_table(services: &[crate::inspect::ServiceSummary]) {
     let mut table = Table::new();
-    table.load_preset(presets::UTF8_FULL_CONDENSED);
+    table.load_preset(presets::UTF8_BORDERS_ONLY);
+    table.set_content_arrangement(ContentArrangement::Disabled);
     table.set_header(vec!["SERVICE", "PORT", "DEPENDS ON", "DIR"]);
 
     for svc in services {
@@ -113,7 +115,8 @@ pub fn print_up_final_table(
     project: &ProjectConfig,
 ) -> Result<()> {
     let mut table = Table::new();
-    table.load_preset(presets::UTF8_FULL_CONDENSED);
+    table.load_preset(presets::UTF8_BORDERS_ONLY);
+    table.set_content_arrangement(ContentArrangement::Disabled);
     table.set_header(vec![
         "SERVICE", "PORT", "HEALTH", "PID", "RESTART", "TIME", "DEPENDS ON",
     ]);
@@ -175,7 +178,8 @@ pub fn print_up_final_table(
 
 pub fn print_up_table(statuses: &[ServiceStatus]) -> Result<()> {
     let mut table = Table::new();
-    table.load_preset(presets::UTF8_FULL_CONDENSED);
+    table.load_preset(presets::UTF8_BORDERS_ONLY);
+    table.set_content_arrangement(ContentArrangement::Disabled);
     table.set_header(vec!["SERVICE", "PORT", "STATUS", "HEALTH"]);
 
     for status in statuses {

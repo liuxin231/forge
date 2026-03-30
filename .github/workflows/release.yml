@@ -19,15 +19,23 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
             cross: false
+            ext: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             cross: false
+            ext: ""
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             cross: false
+            ext: ""
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            ext: .exe
 
     steps:
       - uses: actions/checkout@v4
@@ -52,9 +60,9 @@ jobs:
       - name: Package binary
         shell: bash
         run: |
-          BINARY="target/${{ matrix.target }}/release/fr"
+          BINARY="target/${{ matrix.target }}/release/fr${{ matrix.ext }}"
           ARCHIVE="fr-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C "$(dirname $BINARY)" "$(basename $BINARY)"
+          tar -czf "$ARCHIVE" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
 
       - name: Upload artifact
