@@ -53,6 +53,11 @@ async fn build_command(svc: &ResolvedService, _workspace_root: &Path) -> Result<
         .up
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Service '{}' has no 'up' field", svc.name))?;
+
+    #[cfg(windows)]
+    return Ok(("cmd".to_string(), vec!["/C".to_string(), up_cmd.clone()]));
+
+    #[cfg(not(windows))]
     Ok(("sh".to_string(), vec!["-c".to_string(), up_cmd.clone()]))
 }
 

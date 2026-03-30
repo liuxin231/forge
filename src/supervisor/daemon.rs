@@ -117,6 +117,13 @@ fn kill_existing_supervisor(workspace_root: &Path) {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
     cleanup_supervisor_files(workspace_root);
 }
 
