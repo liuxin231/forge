@@ -246,6 +246,7 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
                     svc_config.config.port,
                     &svc_config.config.health,
                     0,
+                    &svc_config.dir,
                 )
                 .await;
 

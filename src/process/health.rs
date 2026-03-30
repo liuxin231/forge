@@ -8,12 +8,14 @@ const CMD_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Wait for a service to become healthy.
 /// `pid` is used to auto-detect the listening port when `port_hint` is not configured.
+/// `cwd` is used as the working directory for `cmd` health checks (e.g. `docker compose exec`).
 pub async fn wait_healthy(
     service_name: &str,
     pid: Option<u32>,
     port_hint: Option<u16>,
     health: &Option<crate::config::service::HealthConfig>,
     timeout_secs: u64,
+    cwd: &std::path::Path,
 ) -> Result<()> {
     let health = match health {
         Some(h) => h,
@@ -54,7 +56,7 @@ pub async fn wait_healthy(
         let healthy = if let Some(http_path) = &health.http {
             check_http(effective_port, http_path).await
         } else if let Some(cmd) = &health.cmd {
-            check_cmd(cmd).await
+            check_cmd(cmd, cwd).await
         } else {
             // No check configured — validation should catch this,
             // but treat as healthy to avoid blocking
@@ -103,7 +105,7 @@ async fn check_http(port: Option<u16>, path: &str) -> bool {
     }
 }
 
-async fn check_cmd(cmd: &crate::config::service::HealthCmd) -> bool {
+async fn check_cmd(cmd: &crate::config::service::HealthCmd, cwd: &std::path::Path) -> bool {
     use crate::config::service::HealthCmd;
 
     let fut = match cmd {
@@ -113,6 +115,7 @@ async fn check_cmd(cmd: &crate::config::service::HealthCmd) -> bool {
             }
             tokio::process::Command::new("sh")
                 .args(["-c", s])
+                .current_dir(cwd)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -124,6 +127,7 @@ async fn check_cmd(cmd: &crate::config::service::HealthCmd) -> bool {
             };
             tokio::process::Command::new(bin)
                 .args(args)
+                .current_dir(cwd)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
@@ -150,7 +154,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_health_config_returns_ok() {
-        let result = wait_healthy("test", None, None, &None, 5).await;
+        let result = wait_healthy("test", None, None, &None, 5, std::path::Path::new("/tmp")).await;
         assert!(result.is_ok());
     }
 
@@ -178,21 +182,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_cmd_success() {
-        assert!(check_cmd(&HealthCmd::Shell("true".to_string())).await);
-        assert!(check_cmd(&HealthCmd::Exec(vec!["true".to_string()])).await);
+        let cwd = std::path::Path::new("/tmp");
+        assert!(check_cmd(&HealthCmd::Shell("true".to_string()), cwd).await);
+        assert!(check_cmd(&HealthCmd::Exec(vec!["true".to_string()]), cwd).await);
     }
 
     #[tokio::test]
     async fn test_check_cmd_failure() {
-        assert!(!check_cmd(&HealthCmd::Shell("false".to_string())).await);
-        assert!(!check_cmd(&HealthCmd::Exec(vec!["false".to_string()])).await);
+        let cwd = std::path::Path::new("/tmp");
+        assert!(!check_cmd(&HealthCmd::Shell("false".to_string()), cwd).await);
+        assert!(!check_cmd(&HealthCmd::Exec(vec!["false".to_string()]), cwd).await);
     }
 
     #[tokio::test]
     async fn test_check_cmd_empty() {
-        assert!(!check_cmd(&HealthCmd::Shell(String::new())).await);
-        assert!(!check_cmd(&HealthCmd::Shell("   ".to_string())).await);
-        assert!(!check_cmd(&HealthCmd::Exec(vec![])).await);
+        let cwd = std::path::Path::new("/tmp");
+        assert!(!check_cmd(&HealthCmd::Shell(String::new()), cwd).await);
+        assert!(!check_cmd(&HealthCmd::Shell("   ".to_string()), cwd).await);
+        assert!(!check_cmd(&HealthCmd::Exec(vec![]), cwd).await);
     }
 
     #[tokio::test]
@@ -205,7 +212,7 @@ mod tests {
             timeout: 60,
         });
         // Use a very short timeout to make test fast
-        let result = wait_healthy("test-svc", None, Some(1), &health, 1).await;
+        let result = wait_healthy("test-svc", None, Some(1), &health, 1, std::path::Path::new("/tmp")).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timeout"));
     }
@@ -219,7 +226,7 @@ mod tests {
             interval: 1,
             timeout: 5,
         });
-        let result = wait_healthy("test-svc", None, None, &health, 5).await;
+        let result = wait_healthy("test-svc", None, None, &health, 5, std::path::Path::new("/tmp")).await;
         assert!(result.is_ok());
     }
 }
