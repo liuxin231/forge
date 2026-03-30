@@ -31,7 +31,7 @@ pub struct LiveList {
 
 const COL_SERVICE: usize = 20;
 const COL_PORT: usize = 8;
-const COL_STATUS: usize = 12;
+const COL_STATUS: usize = 18;
 
 fn border(left: &str, fill: &str, mid: &str, right: &str, widths: &[usize]) -> String {
     let parts: Vec<String> = widths.iter().map(|w| fill.repeat(w + 2)).collect();
@@ -173,7 +173,22 @@ impl LiveList {
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "-".to_string());
 
-            let status_plain = format!("{} {}", row.icon, row.label);
+            let status_plain = if row.label == "starting" || row.label == "stopping" {
+                if let Some(started) = row.started_at {
+                    let secs = started.elapsed().as_secs();
+                    format!("{} {} ({}s)", row.icon, row.label, secs)
+                } else {
+                    format!("{} {}", row.icon, row.label)
+                }
+            } else if let Some(elapsed) = row.elapsed_secs {
+                if elapsed < 10.0 {
+                    format!("{} {} ({:.1}s)", row.icon, row.label, elapsed)
+                } else {
+                    format!("{} {} ({:.0}s)", row.icon, row.label, elapsed)
+                }
+            } else {
+                format!("{} {}", row.icon, row.label)
+            };
             let sp = format!("{:<width$}", status_plain, width = COL_STATUS);
             let status_col = match row.state {
                 RowState::Running => sp.green().to_string(),

@@ -9,7 +9,7 @@ const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Default read timeout for quick supervisor responses (status, down, logs)
 const READ_TIMEOUT_DEFAULT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Extended read timeout for operations that involve health checks (up, restart)
-const READ_TIMEOUT_LONG: std::time::Duration = std::time::Duration::from_secs(300);
+pub const READ_TIMEOUT_LONG: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub struct SupervisorClient {
     reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
@@ -39,9 +39,19 @@ impl SupervisorClient {
             _ => READ_TIMEOUT_DEFAULT,
         };
 
-        let json = serde_json::to_string(&request)? + "\n";
-        self.writer.write_all(json.as_bytes()).await?;
+        self.write_request(&request).await?;
+        self.read_response(timeout).await
+    }
 
+    /// Write a request without waiting for the response.
+    pub async fn write_request(&mut self, request: &Request) -> Result<()> {
+        let json = serde_json::to_string(request)? + "\n";
+        self.writer.write_all(json.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Read a response with the given timeout.
+    pub async fn read_response(&mut self, timeout: std::time::Duration) -> Result<Response> {
         let mut line = String::new();
         let n = tokio::time::timeout(
             timeout,
