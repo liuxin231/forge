@@ -17,7 +17,7 @@ toml = "0.8"
 petgraph = "0.7"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 colored = "3"
-tabled = "0.17"
+comfy-table = "7"
 dirs = "6"
 glob = "0.3"
 chrono = "0.4"

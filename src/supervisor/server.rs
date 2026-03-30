@@ -1,7 +1,7 @@
 use super::protocol::{
     HealthStatus, ProcessStatus, Request, Response, ServiceStatus,
 };
-use crate::config::ProjectConfig;
+use crate::config::{ProjectConfig, ServiceMode};
 use crate::log::collector::{spawn_log_collector, LogBuffer, LogLine};
 use crate::process::{health, platform, runner};
 use crate::process::restart::RestartTracker;
@@ -315,8 +315,18 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
 }
 
 async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {
-    // Phase 1: collect PIDs and mark as explicitly stopped (under lock, no await).
-    let stop_tasks: Vec<(u32, u64, bool, String)> = {
+    // Phase 1: collect stop tasks; mark services as explicitly stopped (under lock, no await).
+    struct StopTask {
+        pid: Option<u32>,
+        kill_timeout: u64,
+        treekill: bool,
+        name: String,
+        /// `down` command to run for oneshot services (no PID to kill).
+        down_cmd: Option<String>,
+        svc_dir: std::path::PathBuf,
+    }
+
+    let stop_tasks: Vec<StopTask> = {
         let mut guard = state.lock().await;
 
         let to_stop: Vec<String> = if services.is_empty() {
@@ -329,33 +339,56 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
         let mut tasks = Vec::new();
 
         for name in &to_stop {
-            let (kill_timeout, treekill) = {
+            let (kill_timeout, treekill, mode, down_cmd, svc_dir) = {
                 let svc = guard.project.services.get(name);
                 (
                     svc.map(|s| s.config.kill_timeout).unwrap_or(10),
                     svc.map(|s| s.config.treekill).unwrap_or(true),
+                    svc.map(|s| s.config.mode.clone()).unwrap_or_default(),
+                    svc.and_then(|s| s.config.down.clone()),
+                    svc.map(|s| s.dir.clone()).unwrap_or_default(),
                 )
             };
 
             if let Some(managed) = guard.services.get_mut(name) {
-                // Mark as explicitly stopped so spawn_monitor won't restart.
                 managed.explicitly_stopped = true;
                 managed.status = ProcessStatus::Stopped;
                 managed.health = HealthStatus::None;
 
-                if let Some(pid) = managed.pid.take() {
-                    tasks.push((pid, kill_timeout, treekill, name.clone()));
+                let pid = managed.pid.take();
+                if pid.is_some() {
                     runner::remove_pid_file(&workspace_root, name);
                 }
+
+                tasks.push(StopTask {
+                    pid,
+                    kill_timeout,
+                    treekill,
+                    name: name.clone(),
+                    // Only run down_cmd when no PID to kill (oneshot or already-exited).
+                    down_cmd: if mode == ServiceMode::Oneshot { down_cmd } else { None },
+                    svc_dir,
+                });
             }
         }
 
         tasks
     }; // lock released here
 
-    // Phase 2: send signals sequentially without holding the lock.
-    for (pid, timeout, treekill, _name) in &stop_tasks {
-        let _ = platform::stop_process(*pid, *timeout, *treekill).await;
+    // Phase 2: kill processes and run down commands sequentially without holding the lock.
+    for task in &stop_tasks {
+        if let Some(pid) = task.pid {
+            let _ = platform::stop_process(pid, task.kill_timeout, task.treekill).await;
+        }
+        if let Some(cmd) = &task.down_cmd {
+            tracing::info!("Running down command for '{}': {}", task.name, cmd);
+            let _ = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .current_dir(&task.svc_dir)
+                .status()
+                .await;
+        }
     }
 
     // Auto-shutdown supervisor if all services are now stopped.
@@ -477,6 +510,28 @@ fn spawn_monitor(
         if managed.explicitly_stopped {
             managed.pid = None;
             managed.detected_port = None;
+            return;
+        }
+
+        // Oneshot: the launcher process is expected to exit 0 immediately.
+        // The real service runs externally (e.g. in Docker). Keep status = Running
+        // and rely on the health check for liveness. Never restart on success.
+        if svc_cfg.config.mode == ServiceMode::Oneshot {
+            let code = exit_status.ok().and_then(|s| s.code());
+            managed.pid = None;
+            managed.detected_port = None;
+            if code == Some(0) {
+                // Launcher exited cleanly — daemon is running externally.
+                managed.status = ProcessStatus::Running;
+            } else {
+                tracing::warn!(
+                    "Oneshot service '{}' exited with code {:?}, marking as errored",
+                    svc_name,
+                    code
+                );
+                managed.status = ProcessStatus::Errored;
+                trigger_shutdown_if_all_stopped(&mut guard);
+            }
             return;
         }
 
