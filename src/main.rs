@@ -138,7 +138,20 @@ async fn cmd_up(targets: Vec<String>, attach: Option<Vec<String>>, json: bool) -
                     }
                     list.render();
 
-                    let response = client.send(Request::Up(level.clone())).await?;
+                    // Send request, then poll response with periodic render updates
+                    client.write_request(&Request::Up(level.clone())).await?;
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+                    ticker.tick().await; // consume the immediate first tick
+                    let response = loop {
+                        tokio::select! {
+                            resp = client.read_response(supervisor::client::READ_TIMEOUT_LONG) => {
+                                break resp?;
+                            }
+                            _ = ticker.tick() => {
+                                list.render();
+                            }
+                        }
+                    };
 
                     match response {
                         Response::Services(statuses) => {

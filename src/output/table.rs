@@ -4,6 +4,31 @@ use anyhow::Result;
 use comfy_table::{presets, Attribute, Cell, Color, ContentArrangement, Table};
 use std::collections::HashMap;
 
+fn term_width() -> u16 {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        if let Ok((w, _)) = crossterm::terminal::size() {
+            return w;
+        }
+    }
+    80
+}
+
+/// Truncate a string to fit within `max` display columns, appending "…" if truncated.
+fn truncate(s: &str, max: usize) -> String {
+    if max <= 1 {
+        return ".".to_string();
+    }
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max - 1; // reserve 1 char for "…"
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 fn status_cell(status: &ProcessStatus) -> Cell {
     match status {
         ProcessStatus::Running => Cell::new("running").fg(Color::Green),
@@ -23,12 +48,22 @@ fn health_cell(health: &HealthStatus) -> Cell {
 }
 
 pub fn print_ps_table(statuses: &[ServiceStatus], project: &ProjectConfig) -> Result<()> {
+    let width = term_width();
+
     let mut table = Table::new();
     table.load_preset(presets::UTF8_BORDERS_ONLY);
-    table.set_content_arrangement(ContentArrangement::Disabled);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_width(width);
     table.set_header(vec![
         "SERVICE", "PORT", "STATUS", "HEALTH", "PID", "RESTART", "DEPENDS ON", "DIR",
     ]);
+
+    // Fixed-width columns take ~50 chars (PORT+STATUS+HEALTH+PID+RESTART + separators).
+    // Remaining space is split among SERVICE, DEPENDS ON, DIR.
+    let flexible_budget = (width as usize).saturating_sub(58);
+    let max_svc = (flexible_budget * 35 / 100).max(10);
+    let max_deps = (flexible_budget * 35 / 100).max(8);
+    let max_dir = (flexible_budget * 30 / 100).max(8);
 
     for status in statuses {
         let port_str = status
@@ -64,14 +99,14 @@ pub fn print_ps_table(statuses: &[ServiceStatus], project: &ProjectConfig) -> Re
         };
 
         table.add_row(vec![
-            Cell::new(&status.name),
+            Cell::new(truncate(&status.name, max_svc)),
             Cell::new(&port_str),
             status_cell(&status.status),
             health_cell(&status.health),
             Cell::new(&pid_str),
             restarts_cell,
-            Cell::new(&deps_str),
-            Cell::new(&dir_str),
+            Cell::new(truncate(&deps_str, max_deps)),
+            Cell::new(truncate(&dir_str, max_dir)),
         ]);
     }
 
@@ -81,10 +116,18 @@ pub fn print_ps_table(statuses: &[ServiceStatus], project: &ProjectConfig) -> Re
 
 /// Services table for `fr inspect` — shows service name, port, depends_on, dir.
 pub fn print_inspect_services_table(services: &[crate::inspect::ServiceSummary]) {
+    let width = term_width();
+
     let mut table = Table::new();
     table.load_preset(presets::UTF8_BORDERS_ONLY);
-    table.set_content_arrangement(ContentArrangement::Disabled);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_width(width);
     table.set_header(vec!["SERVICE", "PORT", "DEPENDS ON", "DIR"]);
+
+    let flexible_budget = (width as usize).saturating_sub(20);
+    let max_svc = (flexible_budget * 30 / 100).max(10);
+    let max_deps = (flexible_budget * 35 / 100).max(8);
+    let max_dir = (flexible_budget * 35 / 100).max(8);
 
     for svc in services {
         let port_str = svc
@@ -97,10 +140,10 @@ pub fn print_inspect_services_table(services: &[crate::inspect::ServiceSummary])
             svc.depends_on.join(", ")
         };
         table.add_row(vec![
-            Cell::new(&svc.name),
+            Cell::new(truncate(&svc.name, max_svc)),
             Cell::new(&port_str),
-            Cell::new(&deps_str),
-            Cell::new(&svc.dir),
+            Cell::new(truncate(&deps_str, max_deps)),
+            Cell::new(truncate(&svc.dir, max_dir)),
         ]);
     }
 
@@ -114,12 +157,19 @@ pub fn print_up_final_table(
     durations: &HashMap<String, f64>,
     project: &ProjectConfig,
 ) -> Result<()> {
+    let width = term_width();
+
     let mut table = Table::new();
     table.load_preset(presets::UTF8_BORDERS_ONLY);
-    table.set_content_arrangement(ContentArrangement::Disabled);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_width(width);
     table.set_header(vec![
         "SERVICE", "PORT", "HEALTH", "PID", "RESTART", "TIME", "DEPENDS ON",
     ]);
+
+    let flexible_budget = (width as usize).saturating_sub(48);
+    let max_svc = (flexible_budget * 50 / 100).max(10);
+    let max_deps = (flexible_budget * 50 / 100).max(8);
 
     for name in start_order {
         let status = statuses.get(name);
@@ -162,13 +212,13 @@ pub fn print_up_final_table(
         let health = status.map(|s| &s.health).unwrap_or(&HealthStatus::None);
 
         table.add_row(vec![
-            Cell::new(name),
+            Cell::new(truncate(name, max_svc)),
             Cell::new(&port_str),
             health_cell(health),
             Cell::new(&pid_str),
             restarts_cell,
             Cell::new(&time_str),
-            Cell::new(&deps),
+            Cell::new(truncate(&deps, max_deps)),
         ]);
     }
 
@@ -177,9 +227,12 @@ pub fn print_up_final_table(
 }
 
 pub fn print_up_table(statuses: &[ServiceStatus]) -> Result<()> {
+    let width = term_width();
+
     let mut table = Table::new();
     table.load_preset(presets::UTF8_BORDERS_ONLY);
-    table.set_content_arrangement(ContentArrangement::Disabled);
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_width(width);
     table.set_header(vec!["SERVICE", "PORT", "STATUS", "HEALTH"]);
 
     for status in statuses {
