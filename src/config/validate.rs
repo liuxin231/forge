@@ -22,7 +22,7 @@ const SERVICE_FIELDS: &[&str] = &[
     "port", "groups", "depends_on", "health", "env", "env_file",
     "up", "down", "build", "dev", "logs", "cwd", "args",
     "autorestart", "max_restarts", "restart_delay", "kill_timeout",
-    "treekill", "attach", "max_memory", "commands",
+    "treekill", "attach", "max_memory", "mode", "commands",
 ];
 const HEALTH_FIELDS: &[&str] = &["http", "cmd", "interval", "timeout"];
 const SERVICE_COMMAND_FIELDS: &[&str] = &["run", "description", "inputs", "outputs"];
@@ -495,9 +495,9 @@ mod tests {
                 treekill: true,
                 attach: false,
                 max_memory: None,
+                mode: crate::config::ServiceMode::Service,
                 commands: HashMap::new(),
-            },
-            dir: PathBuf::from("/tmp/test"),
+            },            dir: PathBuf::from("/tmp/test"),
         }
     }
 

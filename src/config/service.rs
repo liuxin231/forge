@@ -1,6 +1,21 @@
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 
+/// How the supervisor treats process exit.
+///
+/// - `service` (default): long-running process; restart on exit.
+/// - `oneshot`: launcher that exits 0 immediately after starting an external
+///   daemon (e.g. `docker compose up -d`). Forge keeps the service marked
+///   as *running* and relies on the health check for liveness; the process
+///   is never restarted on successful exit.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceMode {
+    #[default]
+    Service,
+    Oneshot,
+}
+
 /// Service-level forge.toml — supports both single [service] and multi [service.xxx]
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceFile {
@@ -133,6 +148,11 @@ pub struct ServiceConfig {
 
     #[serde(default)]
     pub max_memory: Option<String>,
+
+    /// How forge treats process exit: `service` (default) = long-running + restart;
+    /// `oneshot` = launcher exits immediately, daemon managed externally.
+    #[serde(default)]
+    pub mode: ServiceMode,
 
     /// Custom commands defined on this service
     #[serde(default)]
