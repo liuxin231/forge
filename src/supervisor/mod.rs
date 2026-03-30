@@ -325,7 +325,7 @@ async fn start_attached_service(
     }
 
     let health_result =
-        health::wait_healthy(name, pid, svc.config.port, &svc.config.health, 0).await;
+        health::wait_healthy(name, pid, svc.config.port, &svc.config.health, 0, &svc.dir).await;
 
     let (status, health_status) = match health_result {
         Ok(()) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Healthy),
@@ -367,7 +367,7 @@ async fn start_attached_service_inline(
     }
 
     let health_result =
-        health::wait_healthy(name, pid, svc.config.port, &svc.config.health, 0).await;
+        health::wait_healthy(name, pid, svc.config.port, &svc.config.health, 0, &svc.dir).await;
 
     let (status, health_status) = match health_result {
         Ok(()) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Healthy),
