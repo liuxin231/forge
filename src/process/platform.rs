@@ -171,10 +171,40 @@ pub fn kill_port_listeners(port: u16) {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // On Windows use netstat + taskkill
-        let _ = port; // suppress unused warning
+        // netstat -ano output: Proto  LocalAddr  ForeignAddr  State  PID
+        let output = match std::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => return,
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 5 || fields[3] != "LISTENING" {
+                continue;
+            }
+            // LocalAddr: "0.0.0.0:8080" or "[::]:8080"
+            let line_port = fields[1]
+                .rsplit(':')
+                .next()
+                .and_then(|s| s.parse::<u16>().ok());
+            if line_port != Some(port) {
+                continue;
+            }
+            if let Ok(pid) = fields[4].parse::<u32>() {
+                tracing::warn!(
+                    "Port {} is occupied by PID {}; killing before service start",
+                    port, pid
+                );
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output();
+            }
+        }
     }
 }
 
@@ -194,12 +224,23 @@ fn detect_ports_impl(pid: u32) -> Vec<u16> {
     detect_ports_lsof(pid)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn detect_ports_impl(pid: u32) -> Vec<u16> {
     detect_ports_lsof(pid)
 }
 
+#[cfg(windows)]
+fn detect_ports_impl(pid: u32) -> Vec<u16> {
+    detect_ports_netstat(pid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn detect_ports_impl(_pid: u32) -> Vec<u16> {
+    vec![]
+}
+
 /// Detect listening ports via `lsof` (works on macOS and Linux).
+#[cfg(not(windows))]
 fn detect_ports_lsof(pid: u32) -> Vec<u16> {
     // Use -a (AND logic) to combine -p and -i filters; without -a, lsof treats them as OR
     // on macOS and returns all internet sockets regardless of PID.
@@ -236,6 +277,46 @@ fn detect_ports_lsof(pid: u32) -> Vec<u16> {
                     if port > 0 && !ports.contains(&port) {
                         ports.push(port);
                     }
+                }
+            }
+        }
+    }
+
+    ports
+}
+
+/// Detect listening ports via `netstat -ano` (Windows only).
+#[cfg(windows)]
+fn detect_ports_netstat(pid: u32) -> Vec<u16> {
+    let output = match std::process::Command::new("netstat")
+        .args(["-ano"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut ports = Vec::new();
+
+    for line in stdout.lines() {
+        // Format: Proto  LocalAddress  ForeignAddress  State  PID
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 5 || fields[3] != "LISTENING" {
+            continue;
+        }
+        let line_pid: u32 = match fields[4].parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if line_pid != pid {
+            continue;
+        }
+        // LocalAddress: "0.0.0.0:8080" or "[::]:8080" or "[::1]:8080"
+        if let Some(port_str) = fields[1].rsplit(':').next() {
+            if let Ok(port) = port_str.parse::<u16>() {
+                if port > 0 && !ports.contains(&port) {
+                    ports.push(port);
                 }
             }
         }
