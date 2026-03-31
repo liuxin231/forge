@@ -149,18 +149,18 @@ impl LiveList {
 
         let widths = [COL_SERVICE, COL_PORT, COL_STATUS];
 
-        let _ = writeln!(out, "{}", border("┏", "━", "┳", "┓", &widths).dimmed());
+        let _ = writeln!(out, "{}", border("┌", "─", "┬", "┐", &widths).dimmed());
         let _ = writeln!(
             out,
             "{}",
             format!(
-                "┃ {:<svc$} ┃ {:<port$} ┃ {:<status$} ┃",
+                "│ {:<svc$} │ {:<port$} │ {:<status$} │",
                 "SERVICE", "PORT", "STATUS",
                 svc = COL_SERVICE, port = COL_PORT, status = COL_STATUS,
             )
             .dimmed()
         );
-        let _ = writeln!(out, "{}", border("┡", "━", "╇", "┩", &widths).dimmed());
+        let _ = writeln!(out, "{}", border("╞", "═", "╪", "╡", &widths).dimmed());
 
         for name in &self.order {
             let row = match self.rows.get(name) {
