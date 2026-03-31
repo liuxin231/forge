@@ -407,6 +407,76 @@ fn parse_proc_tcp_listen(
     ports
 }
 
+/// Detect the first host port from a docker-compose.yml in the service directory.
+/// Only activates when the service's `up` command involves docker compose.
+pub fn detect_docker_compose_port(
+    service_dir: &std::path::Path,
+    up_cmd: &Option<String>,
+) -> Option<u16> {
+    let cmd = up_cmd.as_deref()?;
+    if !cmd.contains("docker compose") && !cmd.contains("docker-compose") {
+        return None;
+    }
+
+    let candidates = [
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ];
+
+    let content = candidates
+        .iter()
+        .find_map(|name| std::fs::read_to_string(service_dir.join(name)).ok())?;
+
+    parse_first_host_port(&content)
+}
+
+/// Parse the first host port from a docker-compose file's `ports:` section.
+/// Supports formats: "5432:5432", "127.0.0.1:5432:5432", "5432"
+fn parse_first_host_port(content: &str) -> Option<u16> {
+    let mut in_ports = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect the start of a ports section
+        if trimmed == "ports:" {
+            in_ports = true;
+            continue;
+        }
+
+        if in_ports {
+            // A YAML list item under ports
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                let val = item.trim().trim_matches('"').trim_matches('\'');
+                if let Some(port) = extract_host_port(val) {
+                    return Some(port);
+                }
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                // Left the ports section
+                in_ports = false;
+            }
+        }
+    }
+    None
+}
+
+/// Extract host port from a docker compose port mapping string.
+/// "5432:5432" → 5432, "127.0.0.1:5432:5432" → 5432, "5432" → 5432
+fn extract_host_port(mapping: &str) -> Option<u16> {
+    // Strip protocol suffix like "/tcp", "/udp"
+    let mapping = mapping.split('/').next().unwrap_or(mapping);
+
+    let parts: Vec<&str> = mapping.split(':').collect();
+    match parts.len() {
+        1 => parts[0].parse().ok(),             // "5432"
+        2 => parts[0].parse().ok(),             // "5432:5432"
+        3 => parts[1].parse().ok(),             // "127.0.0.1:5432:5432"
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +506,59 @@ mod tests {
         // Should return Ok (ESRCH handled gracefully)
         let result = stop_process(99999999, 1, false).await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_first_host_port_standard() {
+        let yaml = r#"
+services:
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    volumes:
+      - data:/var/lib/postgresql/data
+"#;
+        assert_eq!(parse_first_host_port(yaml), Some(5432));
+    }
+
+    #[test]
+    fn test_parse_first_host_port_with_host() {
+        let yaml = r#"
+services:
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+"#;
+        assert_eq!(parse_first_host_port(yaml), Some(6379));
+    }
+
+    #[test]
+    fn test_parse_first_host_port_short_form() {
+        let yaml = r#"
+services:
+  app:
+    ports:
+      - "3000"
+"#;
+        assert_eq!(parse_first_host_port(yaml), Some(3000));
+    }
+
+    #[test]
+    fn test_parse_first_host_port_no_ports() {
+        let yaml = r#"
+services:
+  app:
+    image: myapp
+"#;
+        assert_eq!(parse_first_host_port(yaml), None);
+    }
+
+    #[test]
+    fn test_extract_host_port() {
+        assert_eq!(extract_host_port("5432:5432"), Some(5432));
+        assert_eq!(extract_host_port("127.0.0.1:5432:5432"), Some(5432));
+        assert_eq!(extract_host_port("3000"), Some(3000));
+        assert_eq!(extract_host_port("8080:80/tcp"), Some(8080));
     }
 }

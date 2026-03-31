@@ -257,11 +257,18 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
 
                 // Detect the port the service is actually listening on.
                 // Filter out the supervisor's own port in case the child inherited the socket.
+                // Falls back to docker-compose.yml port parsing, then config.port.
                 let detected_port = pid
                     .and_then(|p| {
                         platform::detect_listening_ports(p)
                             .into_iter()
                             .find(|&port| port != supervisor_port)
+                    })
+                    .or_else(|| {
+                        platform::detect_docker_compose_port(
+                            &svc_config.dir,
+                            &svc_config.config.up,
+                        )
                     })
                     .or(svc_config.config.port);
 
@@ -413,17 +420,32 @@ async fn handle_restart(services: Vec<String>, state: &Arc<Mutex<SupervisorState
 async fn handle_status(filter: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {
     let guard = state.lock().await;
 
+    // Collect running services that need a live health check
+    let mut to_check: Vec<(String, Option<u16>, Option<crate::config::service::HealthConfig>, PathBuf)> = Vec::new();
+
     let mut statuses: Vec<ServiceStatus> = guard
         .services
         .values()
         .filter(|s| filter.is_empty() || filter.contains(&s.name))
-        .map(|s| ServiceStatus {
-            name: s.name.clone(),
-            port: s.detected_port,
-            status: s.status.clone(),
-            health: s.health.clone(),
-            pid: s.pid,
-            restarts: s.restart_tracker.restart_count,
+        .map(|s| {
+            if s.status == ProcessStatus::Running {
+                if let Some(svc_cfg) = guard.project.services.get(&s.name) {
+                    to_check.push((
+                        s.name.clone(),
+                        s.detected_port.or(svc_cfg.config.port),
+                        svc_cfg.config.health.clone(),
+                        svc_cfg.dir.clone(),
+                    ));
+                }
+            }
+            ServiceStatus {
+                name: s.name.clone(),
+                port: s.detected_port,
+                status: s.status.clone(),
+                health: s.health.clone(),
+                pid: s.pid,
+                restarts: s.restart_tracker.restart_count,
+            }
         })
         .collect();
 
@@ -440,6 +462,32 @@ async fn handle_status(filter: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
                 pid: None,
                 restarts: 0,
             });
+        }
+    }
+
+    // Release lock before doing async health checks
+    drop(guard);
+
+    // Run live health checks for running services
+    if !to_check.is_empty() {
+        let mut result_map: HashMap<String, HealthStatus> = HashMap::new();
+        for (name, port, health_cfg, cwd) in to_check {
+            let healthy = health::check_health_once(port, &health_cfg, &cwd).await;
+            let status = if healthy { HealthStatus::Healthy } else { HealthStatus::Unhealthy };
+            result_map.insert(name, status);
+        }
+        for status in &mut statuses {
+            if let Some(health) = result_map.get(&status.name) {
+                status.health = health.clone();
+            }
+        }
+
+        // Also update cached state so monitor/restart logic sees fresh health
+        let mut guard = state.lock().await;
+        for (name, health) in &result_map {
+            if let Some(managed) = guard.services.get_mut(name) {
+                managed.health = health.clone();
+            }
         }
     }
 

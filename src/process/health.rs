@@ -147,6 +147,27 @@ async fn check_cmd(cmd: &crate::config::service::HealthCmd, cwd: &std::path::Pat
     }
 }
 
+/// Perform a single health check (no retries, no timeout loop).
+/// Returns true if healthy, false otherwise.
+pub async fn check_health_once(
+    port: Option<u16>,
+    health: &Option<crate::config::service::HealthConfig>,
+    cwd: &std::path::Path,
+) -> bool {
+    let health = match health {
+        Some(h) => h,
+        None => return true, // no health check configured = healthy
+    };
+
+    if let Some(http_path) = &health.http {
+        check_http(port, http_path).await
+    } else if let Some(cmd) = &health.cmd {
+        check_cmd(cmd, cwd).await
+    } else {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
