@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.6
+
+- feat: docker compose port detection and live health checks on status (d7dc3bf)
+- style: unify LiveList table borders to match UTF8_BORDERS_ONLY preset (f4f7c8d)
+
 ## v0.1.5
 
 - feat: adaptive table width and live startup progress display (380f8ff)
