@@ -27,19 +27,35 @@ pub struct LiveList {
     order: Vec<String>,
     rows: HashMap<String, Row>,
     lines_printed: usize,
+    col_service: usize,
 }
 
-const COL_SERVICE: usize = 20;
+const MAX_COL_SERVICE: usize = 30;
 const COL_PORT: usize = 8;
 const COL_STATUS: usize = 18;
 
-fn border(left: &str, fill: &str, mid: &str, right: &str, widths: &[usize]) -> String {
-    let parts: Vec<String> = widths.iter().map(|w| fill.repeat(w + 2)).collect();
-    format!("{}{}{}", left, parts.join(mid), right)
+/// Truncate a string to `max` chars, appending "…" if truncated.
+fn truncate_to(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut end = max.saturating_sub(1);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 impl LiveList {
     pub fn new(order: Vec<String>) -> Self {
+        let col_service = order
+            .iter()
+            .map(|n| n.chars().count())
+            .max()
+            .unwrap_or(7)
+            .max(7) // at least wide enough for "SERVICE" header
+            .min(MAX_COL_SERVICE);
+
         let rows = order
             .iter()
             .map(|name| {
@@ -61,6 +77,7 @@ impl LiveList {
             order,
             rows,
             lines_printed: 0,
+            col_service,
         }
     }
 
@@ -147,20 +164,24 @@ impl LiveList {
             let _ = write!(out, "\x1b[{}A\x1b[0J", self.lines_printed);
         }
 
-        let widths = [COL_SERVICE, COL_PORT, COL_STATUS];
+        // inner width: 1 space + SERVICE + 3 spaces + PORT + 3 spaces + STATUS + 1 space
+        let inner = 1 + self.col_service + 3 + COL_PORT + 3 + COL_STATUS + 1;
+        let top = format!("┌{}┐", "─".repeat(inner));
+        let sep = format!("╞{}╡", "═".repeat(inner));
+        let bot = format!("└{}┘", "─".repeat(inner));
 
-        let _ = writeln!(out, "{}", border("┌", "─", "┬", "┐", &widths).dimmed());
+        let _ = writeln!(out, "{}", top.dimmed());
         let _ = writeln!(
             out,
             "{}",
             format!(
-                "│ {:<svc$} │ {:<port$} │ {:<status$} │",
+                "│ {:<svc$}   {:<port$}   {:<status$} │",
                 "SERVICE", "PORT", "STATUS",
-                svc = COL_SERVICE, port = COL_PORT, status = COL_STATUS,
+                svc = self.col_service, port = COL_PORT, status = COL_STATUS,
             )
             .dimmed()
         );
-        let _ = writeln!(out, "{}", border("╞", "═", "╪", "╡", &widths).dimmed());
+        let _ = writeln!(out, "{}", sep.dimmed());
 
         for name in &self.order {
             let row = match self.rows.get(name) {
@@ -168,6 +189,7 @@ impl LiveList {
                 None => continue,
             };
 
+            let name_display = truncate_to(name, self.col_service);
             let port_str = row
                 .port
                 .map(|p| p.to_string())
@@ -200,13 +222,13 @@ impl LiveList {
 
             let _ = writeln!(
                 out,
-                "│ {:<svc$} │ {:<port$} │ {} │",
-                name, port_str, status_col,
-                svc = COL_SERVICE, port = COL_PORT,
+                "│ {:<svc$}   {:<port$}   {} │",
+                name_display, port_str, status_col,
+                svc = self.col_service, port = COL_PORT,
             );
         }
 
-        let _ = writeln!(out, "{}", border("└", "─", "┴", "┘", &widths).dimmed());
+        let _ = writeln!(out, "{}", bot.dimmed());
         let _ = out.flush();
 
         // top border + header + separator + rows + bottom border
