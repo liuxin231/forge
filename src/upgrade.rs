@@ -16,12 +16,17 @@ pub async fn run(check_only: bool) -> Result<()> {
     let release = fetch_latest_release().await?;
     let latest = &release.tag_name;
 
-    if latest == &current || latest.trim_start_matches('v') == CURRENT_VERSION {
+    let current_semver = semver::Version::parse(CURRENT_VERSION)
+        .map_err(|e| anyhow::anyhow!("Failed to parse current version '{}': {}", CURRENT_VERSION, e))?;
+    let latest_semver = semver::Version::parse(latest.trim_start_matches('v'))
+        .map_err(|e| anyhow::anyhow!("Failed to parse latest version '{}': {}", latest, e))?;
+
+    eprintln!("Latest version:  {}", latest.bold().cyan());
+
+    if current_semver >= latest_semver {
         eprintln!("{}", "Already up to date.".green());
         return Ok(());
     }
-
-    eprintln!("Latest version:  {}", latest.bold().cyan());
 
     if check_only {
         eprintln!();
