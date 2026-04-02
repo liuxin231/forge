@@ -9,6 +9,7 @@ const CMD_CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Wait for a service to become healthy.
 /// `pid` is used to auto-detect the listening port when `port_hint` is not configured.
 /// `cwd` is used as the working directory for `cmd` health checks (e.g. `docker compose exec`).
+/// Returns the port the service was confirmed healthy on (for HTTP checks), or `None` for cmd/unconfigured checks.
 pub async fn wait_healthy(
     service_name: &str,
     pid: Option<u32>,
@@ -16,12 +17,12 @@ pub async fn wait_healthy(
     health: &Option<crate::config::service::HealthConfig>,
     timeout_secs: u64,
     cwd: &std::path::Path,
-) -> Result<()> {
+) -> Result<Option<u16>> {
     let health = match health {
         Some(h) => h,
         None => {
             tracing::debug!("No health check configured for '{}', assuming ready", service_name);
-            return Ok(());
+            return Ok(None);
         }
     };
 
@@ -67,7 +68,10 @@ pub async fn wait_healthy(
 
         if healthy {
             tracing::info!("'{}' is healthy", service_name);
-            return Ok(());
+            // For HTTP checks return the port we actually connected to so callers
+            // can display it without re-running port detection.
+            let confirmed_port = if health.http.is_some() { effective_port } else { None };
+            return Ok(confirmed_port);
         }
 
         tokio::time::sleep(interval).await;
@@ -178,7 +182,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_health_config_returns_ok() {
         let result = wait_healthy("test", None, None, &None, 5, std::path::Path::new("/tmp")).await;
-        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
     }
 
     #[tokio::test]
@@ -250,6 +254,6 @@ mod tests {
             timeout: 5,
         });
         let result = wait_healthy("test-svc", None, None, &health, 5, std::path::Path::new("/tmp")).await;
-        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
     }
 }

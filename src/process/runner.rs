@@ -9,11 +9,6 @@ pub async fn start_service(svc: &ResolvedService, workspace_root: &Path) -> Resu
     let (program, args) = build_command(svc, workspace_root).await?;
     let cwd = get_working_dir(svc)?;
 
-    // Kill any process already occupying the configured port before spawning.
-    if let Some(port) = svc.config.port {
-        crate::process::platform::kill_port_listeners(port);
-    }
-
     tracing::info!("Starting '{}': {} {}", svc.name, program, args.join(" "));
 
     let mut cmd = Command::new(&program);
