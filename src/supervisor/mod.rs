@@ -327,13 +327,13 @@ async fn start_attached_service(
     let health_result =
         health::wait_healthy(name, pid, svc.config.port, &svc.config.health, 0, &svc.dir).await;
 
-    let (status, health_status) = match health_result {
-        Ok(()) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Healthy),
-        Err(_) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Unhealthy),
+    let (status, health_status, health_port) = match health_result {
+        Ok(p) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Healthy, p),
+        Err(_) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Unhealthy, None),
     };
 
-    let detected_port = pid
-        .and_then(|p| platform::detect_listening_ports(p).into_iter().next())
+    let detected_port = health_port
+        .or_else(|| pid.and_then(|p| platform::detect_listening_ports(p).into_iter().next()))
         .or(svc.config.port);
 
     Ok(StartResult::Attached(
@@ -369,13 +369,13 @@ async fn start_attached_service_inline(
     let health_result =
         health::wait_healthy(name, pid, svc.config.port, &svc.config.health, 0, &svc.dir).await;
 
-    let (status, health_status) = match health_result {
-        Ok(()) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Healthy),
-        Err(_) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Unhealthy),
+    let (status, health_status, health_port) = match health_result {
+        Ok(p) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Healthy, p),
+        Err(_) => (protocol::ProcessStatus::Running, protocol::HealthStatus::Unhealthy, None),
     };
 
-    let detected_port = pid
-        .and_then(|p| platform::detect_listening_ports(p).into_iter().next())
+    let detected_port = health_port
+        .or_else(|| pid.and_then(|p| platform::detect_listening_ports(p).into_iter().next()))
         .or(svc.config.port);
 
     Ok((

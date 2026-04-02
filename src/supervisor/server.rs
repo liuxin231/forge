@@ -250,41 +250,43 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
                 )
                 .await;
 
-                let health_status = match health_result {
-                    Ok(()) => HealthStatus::Healthy,
-                    Err(_) => HealthStatus::Unhealthy,
+                let (health_status, health_port) = match health_result {
+                    Ok(p) => (HealthStatus::Healthy, p),
+                    Err(_) => (HealthStatus::Unhealthy, None),
                 };
 
-                // Detect the port the service is actually listening on.
-                // Filter out the supervisor's own port in case the child inherited the socket.
-                // Retry with backoff: some services (e.g. rsbuild) finish health checks before
-                // they have bound their listen socket, so a single probe would miss the port.
-                // We retry for up to PORT_DETECT_TIMEOUT_MS, then fall back.
+                // Prefer the port returned by the health check (already confirmed reachable).
+                // Fall back to lsof-based detection with retry for cmd-checked or unconfigured
+                // services, then docker-compose port parsing, then the configured port.
                 const PORT_DETECT_INTERVAL_MS: u64 = 300;
                 const PORT_DETECT_TIMEOUT_MS: u64 = 5_000;
-                let detected_port = 'detect: {
-                    if let Some(p) = pid {
-                        let attempts = PORT_DETECT_TIMEOUT_MS / PORT_DETECT_INTERVAL_MS;
-                        for attempt in 0..=attempts {
-                            let ports = platform::detect_listening_ports(p);
-                            if let Some(port) =
-                                ports.into_iter().find(|&pp| pp != supervisor_port)
-                            {
-                                break 'detect Some(port);
-                            }
-                            if attempt < attempts {
-                                tokio::time::sleep(
-                                    std::time::Duration::from_millis(PORT_DETECT_INTERVAL_MS),
-                                )
-                                .await;
+                let detected_port = if health_port.is_some() {
+                    health_port
+                } else {
+                    'detect: {
+                        if let Some(p) = pid {
+                            let attempts = PORT_DETECT_TIMEOUT_MS / PORT_DETECT_INTERVAL_MS;
+                            for attempt in 0..=attempts {
+                                let ports = platform::detect_listening_ports(p);
+                                if let Some(port) =
+                                    ports.into_iter().find(|&pp| pp != supervisor_port)
+                                {
+                                    break 'detect Some(port);
+                                }
+                                if attempt < attempts {
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_millis(PORT_DETECT_INTERVAL_MS),
+                                    )
+                                    .await;
+                                }
                             }
                         }
+                        platform::detect_docker_compose_port(
+                            &svc_config.dir,
+                            &svc_config.config.up,
+                        )
+                        .or(svc_config.config.port)
                     }
-                    platform::detect_docker_compose_port(
-                        &svc_config.dir,
-                        &svc_config.config.up,
-                    )
-                    .or(svc_config.config.port)
                 };
 
                 let mut tracker = RestartTracker::new(
