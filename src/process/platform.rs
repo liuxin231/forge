@@ -315,15 +315,17 @@ fn detect_ports_lsof(pids: &[u32]) -> Vec<u16> {
     let mut ports = Vec::new();
 
     for line in stdout.lines() {
-        // Regular output format: COMMAND PID USER FD TYPE ... NAME
+        // Regular output format: COMMAND PID USER FD TYPE ... NAME [STATE]
         // NAME field looks like "*:8080" or "127.0.0.1:9090" or "[::]:5100"
+        // The state " (LISTEN)" may appear as a trailing token even with -sTCP:LISTEN.
         // Skip header line
         if line.starts_with("COMMAND") {
             continue;
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if let Some(name) = fields.last() {
-            // Strip trailing " (LISTEN)" if present — it shouldn't be since -sTCP:LISTEN filters it
+        // Walk from the end to find the first field that looks like "addr:port"
+        // (contains ':' and doesn't start with '(', ruling out the "(LISTEN)" token).
+        if let Some(name) = fields.iter().rev().find(|s| s.contains(':') && !s.starts_with('(')) {
             if let Some(port_str) = name.rsplit(':').next() {
                 if let Ok(port) = port_str.parse::<u16>() {
                     if port > 0 && !ports.contains(&port) {

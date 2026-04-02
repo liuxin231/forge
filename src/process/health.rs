@@ -45,16 +45,19 @@ pub async fn wait_healthy(
             );
         }
 
-        // Resolve port: prefer the port the process is actually listening on (lsof),
-        // fall back to the configured port hint. This handles dev servers (e.g. rsbuild)
-        // that auto-switch to another port when the configured one is occupied.
-        let effective_port = pid
-            .and_then(|p| {
+        // For HTTP health checks, only use ports from this service's own process tree.
+        // Falling back to port_hint risks hitting a *different* service already bound
+        // to that port (e.g. another dev-server), producing a false-positive on the
+        // wrong port.  For cmd checks the port is irrelevant.
+        let effective_port = if health.http.is_some() {
+            pid.and_then(|p| {
                 crate::process::platform::detect_listening_ports(p)
                     .into_iter()
                     .next()
             })
-            .or(port_hint);
+        } else {
+            port_hint
+        };
 
         let healthy = if let Some(http_path) = &health.http {
             check_http(effective_port, http_path).await
