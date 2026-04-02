@@ -285,7 +285,9 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
                             &svc_config.dir,
                             &svc_config.config.up,
                         )
-                        .or(svc_config.config.port)
+                        // Intentionally no .or(config.port) fallback: the configured port
+                        // may be occupied by a different service, leading to a wrong display.
+                        // Prefer None over a misleading port number.
                     }
                 };
 
@@ -435,29 +437,50 @@ async fn handle_restart(services: Vec<String>, state: &Arc<Mutex<SupervisorState
 }
 
 async fn handle_status(filter: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {
-    let guard = state.lock().await;
+    let mut guard = state.lock().await;
 
     // Collect running services that need a live health check
     let mut to_check: Vec<(String, Option<u16>, Option<crate::config::service::HealthConfig>, PathBuf)> = Vec::new();
+    // Port updates to apply after collect() releases the immutable borrow
+    let mut port_updates: Vec<(String, Option<u16>)> = Vec::new();
 
     let mut statuses: Vec<ServiceStatus> = guard
         .services
         .values()
         .filter(|s| filter.is_empty() || filter.contains(&s.name))
         .map(|s| {
+            // For running services, detect the actual port from the OS process tree.
+            // This handles services that auto-switch ports (e.g. rsbuild finding its
+            // configured port occupied) and ensures we never display the config port
+            // when a different service is already bound there.
+            let live_port = if s.status == ProcessStatus::Running {
+                s.pid.and_then(|p| platform::detect_listening_ports(p).into_iter().next())
+            } else {
+                None
+            };
+
+            // Prefer live detection; fall back to cached value (but NOT config port).
+            let effective_port = live_port.or(s.detected_port);
+
             if s.status == ProcessStatus::Running {
                 if let Some(svc_cfg) = guard.project.services.get(&s.name) {
                     to_check.push((
                         s.name.clone(),
-                        s.detected_port.or(svc_cfg.config.port),
+                        effective_port,
                         svc_cfg.config.health.clone(),
                         svc_cfg.dir.clone(),
                     ));
                 }
             }
+
+            // Queue port update when live detection found a port not yet cached
+            if live_port.is_some() && live_port != s.detected_port {
+                port_updates.push((s.name.clone(), live_port));
+            }
+
             ServiceStatus {
                 name: s.name.clone(),
-                port: s.detected_port,
+                port: effective_port,
                 status: s.status.clone(),
                 health: s.health.clone(),
                 pid: s.pid,
@@ -465,6 +488,13 @@ async fn handle_status(filter: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
             }
         })
         .collect();
+
+    // Persist newly detected ports back to the managed state
+    for (name, port) in port_updates {
+        if let Some(managed) = guard.services.get_mut(&name) {
+            managed.detected_port = port;
+        }
+    }
 
     // Also include services that are known but not started
     for name in guard.project.services.keys() {
