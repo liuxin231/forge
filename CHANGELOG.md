@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.1.11
+
+- fix(port): remove kill_port_listeners — port config is a hint, not an exclusive claim; services handle port conflicts themselves (906d6a2)
+- fix(port): propagate health-check confirmed port to avoid re-running lsof detection that could fall back to config port (dee2b1b)
+
+## v0.1.10
+
+- fix(server): retry port detection after health check with 5s backoff (b1ea150)
+
+## v0.1.9
+
+- fix(platform): detect listening ports across full process tree for shell-wrapped services (sh → yarn → node) (1eb9dac)
+- test: comprehensive unit test coverage across 6 modules (e777bd7)
+
+## v0.1.8
+
+- fix: use actual listening port for health check instead of configured port (4e6528e)
+- feat: docker compose port detection and live health checks on status (d7dc3bf)
+
 ## v0.1.6
 
 - feat: docker compose port detection and live health checks on status (d7dc3bf)
