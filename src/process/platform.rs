@@ -209,24 +209,72 @@ pub fn kill_port_listeners(port: u16) {
 }
 
 /// Detect TCP ports that a process is listening on by inspecting OS state.
-/// Returns an empty vec if the process has no listening ports or detection fails.
+/// Checks the entire process tree (pid + all descendants) so that child processes
+/// spawned by shell wrappers (e.g. sh → yarn → node) are also detected.
+/// Returns an empty vec if no listening ports are found or detection fails.
 pub fn detect_listening_ports(pid: u32) -> Vec<u16> {
     detect_ports_impl(pid)
 }
 
+/// Collect all PIDs in the process tree rooted at `root` (including `root` itself).
+/// Uses `ps -axo pid=,ppid=` which is portable across Linux and macOS.
+#[cfg(not(windows))]
+fn get_process_tree(root: u32) -> Vec<u32> {
+    use std::collections::HashMap;
+
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid="])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return vec![root],
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in stdout.lines() {
+        let mut iter = line.split_whitespace();
+        let pid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let ppid: u32 = match iter.next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    let mut result = Vec::new();
+    let mut queue = vec![root];
+    while let Some(pid) = queue.pop() {
+        if result.contains(&pid) {
+            continue;
+        }
+        result.push(pid);
+        if let Some(kids) = children.get(&pid) {
+            queue.extend_from_slice(kids);
+        }
+    }
+    result
+}
+
 #[cfg(target_os = "linux")]
 fn detect_ports_impl(pid: u32) -> Vec<u16> {
+    let pids = get_process_tree(pid);
     // Prefer /proc (no external tools) with lsof as fallback
-    let ports = detect_ports_proc(pid);
+    let ports = detect_ports_proc_tree(&pids);
     if !ports.is_empty() {
         return ports;
     }
-    detect_ports_lsof(pid)
+    detect_ports_lsof(&pids)
 }
 
 #[cfg(target_os = "macos")]
 fn detect_ports_impl(pid: u32) -> Vec<u16> {
-    detect_ports_lsof(pid)
+    let pids = get_process_tree(pid);
+    detect_ports_lsof(&pids)
 }
 
 #[cfg(windows)]
@@ -239,16 +287,20 @@ fn detect_ports_impl(_pid: u32) -> Vec<u16> {
     vec![]
 }
 
-/// Detect listening ports via `lsof` (works on macOS and Linux).
+/// Detect listening ports via `lsof` for a set of PIDs (works on macOS and Linux).
 #[cfg(not(windows))]
-fn detect_ports_lsof(pid: u32) -> Vec<u16> {
+fn detect_ports_lsof(pids: &[u32]) -> Vec<u16> {
+    if pids.is_empty() {
+        return vec![];
+    }
+    let pid_list = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
     // Use -a (AND logic) to combine -p and -i filters; without -a, lsof treats them as OR
     // on macOS and returns all internet sockets regardless of PID.
     let output = match std::process::Command::new("lsof")
         .args([
             "-a",
             "-p",
-            &pid.to_string(),
+            &pid_list,
             "-iTCP",
             "-sTCP:LISTEN",
             "-nP",
@@ -325,18 +377,21 @@ fn detect_ports_netstat(pid: u32) -> Vec<u16> {
     ports
 }
 
-/// Detect listening ports via Linux /proc filesystem (no external tools needed).
+/// Detect listening ports via Linux /proc filesystem for a set of PIDs (no external tools needed).
 #[cfg(target_os = "linux")]
-fn detect_ports_proc(pid: u32) -> Vec<u16> {
-    let inodes = collect_socket_inodes(pid);
-    if inodes.is_empty() {
+fn detect_ports_proc_tree(pids: &[u32]) -> Vec<u16> {
+    let mut all_inodes = std::collections::HashSet::new();
+    for &pid in pids {
+        all_inodes.extend(collect_socket_inodes(pid));
+    }
+    if all_inodes.is_empty() {
         return vec![];
     }
 
     let mut ports = Vec::new();
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
         if let Ok(content) = std::fs::read_to_string(path) {
-            for port in parse_proc_tcp_listen(&content, &inodes) {
+            for port in parse_proc_tcp_listen(&content, &all_inodes) {
                 if !ports.contains(&port) {
                     ports.push(port);
                 }
