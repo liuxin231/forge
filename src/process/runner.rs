@@ -158,6 +158,38 @@ fn shell_words(s: &str) -> Result<Vec<String>> {
 mod tests {
     use super::*;
 
+    /// Convenience constructor for tests — avoids repeating the full ServiceConfig struct.
+    fn make_svc(dir: &std::path::Path, up: Option<&str>, cwd: Option<&str>) -> ResolvedService {
+        ResolvedService {
+            name: "test".to_string(),
+            config: crate::config::ServiceConfig {
+                port: None,
+                groups: vec![],
+                depends_on: vec![],
+                health: None,
+                env: std::collections::HashMap::new(),
+                env_file: None,
+                up: up.map(|s| s.to_string()),
+                down: None,
+                build: None,
+                dev: None,
+                logs: None,
+                cwd: cwd.map(|s| s.to_string()),
+                args: None,
+                autorestart: true,
+                max_restarts: 10,
+                restart_delay: 3,
+                kill_timeout: 10,
+                treekill: true,
+                attach: false,
+                max_memory: None,
+                mode: crate::config::ServiceMode::Service,
+                commands: std::collections::HashMap::new(),
+            },
+            dir: dir.to_path_buf(),
+        }
+    }
+
     #[test]
     fn test_shell_words_simple() {
         assert_eq!(shell_words("a b c").unwrap(), vec!["a", "b", "c"]);
@@ -298,5 +330,130 @@ mod tests {
 
         remove_pid_file(dir.path(), "test/api");
         assert!(!pid_file.exists());
+    }
+
+    // ── sanitize_service_name ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_plain_name_unchanged() {
+        assert_eq!(sanitize_service_name("api"), "api");
+        assert_eq!(sanitize_service_name("my-service"), "my-service");
+    }
+
+    #[test]
+    fn test_sanitize_forward_slash_becomes_dash() {
+        assert_eq!(sanitize_service_name("apps/api"), "apps-api");
+        assert_eq!(sanitize_service_name("a/b/c"), "a-b-c");
+    }
+
+    #[test]
+    fn test_sanitize_backslash_becomes_dash() {
+        assert_eq!(sanitize_service_name("apps\\api"), "apps-api");
+    }
+
+    #[test]
+    fn test_sanitize_special_chars_become_dashes() {
+        assert_eq!(sanitize_service_name("my:service"), "my-service");
+        assert_eq!(sanitize_service_name("my*service"), "my-service");
+        assert_eq!(sanitize_service_name("my?service"), "my-service");
+        assert_eq!(sanitize_service_name("my service"), "my-service");
+        assert_eq!(sanitize_service_name("my\nservice"), "my-service");
+        assert_eq!(sanitize_service_name("my\rservice"), "my-service");
+        assert_eq!(sanitize_service_name("my\0service"), "my-service");
+    }
+
+    #[test]
+    fn test_sanitize_leading_dot_becomes_dash() {
+        assert_eq!(sanitize_service_name(".hidden"), "-hidden");
+    }
+
+    #[test]
+    fn test_sanitize_inner_dot_preserved() {
+        // Only the FIRST character is checked for leading dot
+        assert_eq!(sanitize_service_name("my.service"), "my.service");
+        assert_eq!(sanitize_service_name("a.b.c"), "a.b.c");
+    }
+
+    #[test]
+    fn test_sanitize_empty_string() {
+        assert_eq!(sanitize_service_name(""), "");
+    }
+
+    // ── build_command ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_build_command_uses_sh_on_unix() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_svc(dir.path(), Some("echo hello"), None);
+        let (program, args) = build_command(&svc, dir.path()).await.unwrap();
+        #[cfg(not(windows))]
+        {
+            assert_eq!(program, "sh");
+            assert_eq!(args, vec!["-c".to_string(), "echo hello".to_string()]);
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(program, "cmd");
+            assert!(args.contains(&"/C".to_string()));
+            assert!(args.contains(&"echo hello".to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_command_no_up_field_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_svc(dir.path(), None, None);
+        let result = build_command(&svc, dir.path()).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no 'up' field"));
+    }
+
+    // ── get_working_dir ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_working_dir_relative_cwd_resolved_against_service_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("subdir");
+        std::fs::create_dir(&sub).unwrap();
+        let svc = make_svc(dir.path(), Some("echo"), Some("subdir"));
+        let result = get_working_dir(&svc).unwrap();
+        assert_eq!(result, sub);
+    }
+
+    #[test]
+    fn test_get_working_dir_absolute_cwd_used_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let svc = make_svc(dir.path(), Some("echo"), Some(other.path().to_str().unwrap()));
+        let result = get_working_dir(&svc).unwrap();
+        assert_eq!(result, other.path());
+    }
+
+    #[test]
+    fn test_get_working_dir_relative_cwd_nonexistent_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_svc(dir.path(), Some("echo"), Some("does_not_exist"));
+        let result = get_working_dir(&svc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not exist"));
+    }
+
+    // ── remove_pid_file ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_remove_pid_file_nonexistent_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        // File was never created — should silently succeed
+        remove_pid_file(dir.path(), "ghost-service");
+    }
+
+    #[test]
+    fn test_write_pid_file_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        // .forge/pids/ doesn't exist yet
+        write_pid_file(dir.path(), "svc", 9999).unwrap();
+        let pid_file = dir.path().join(".forge/pids/svc.pid");
+        assert!(pid_file.exists());
+        assert_eq!(std::fs::read_to_string(&pid_file).unwrap(), "9999");
     }
 }

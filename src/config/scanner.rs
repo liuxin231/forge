@@ -594,4 +594,192 @@ apps = "nonexistent"
         let project = load_project(root).unwrap();
         assert!(project.services.is_empty());
     }
+
+    // ── scan_directory: MAX_SCAN_DEPTH ────────────────────────────────────────
+
+    #[test]
+    fn test_scan_directory_stops_at_max_depth() {
+        let root = tempfile::tempdir().unwrap();
+        // Create a directory chain deeper than MAX_SCAN_DEPTH (20)
+        let mut deep = root.path().to_path_buf();
+        for _ in 0..=MAX_SCAN_DEPTH + 2 {
+            deep = deep.join("level");
+            std::fs::create_dir_all(&deep).unwrap();
+        }
+        // Place a forge.toml at the very bottom — it must NOT be picked up
+        std::fs::write(
+            deep.join("forge.toml"),
+            "[service]\ntype = \"command\"\nup = \"echo deep\"\n",
+        )
+        .unwrap();
+
+        let mut services = HashMap::new();
+        let result = scan_directory(root.path(), root.path(), "", &[], &mut services, 0);
+        assert!(result.is_ok(), "scan should not error on deep paths, just skip them");
+        assert!(
+            services.is_empty(),
+            "service beyond MAX_SCAN_DEPTH must not be registered"
+        );
+    }
+
+    // ── scan_directory: ignore patterns ──────────────────────────────────────
+
+    #[test]
+    fn test_scan_directory_ignores_matching_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let ignored = root.path().join("node_modules");
+        std::fs::create_dir_all(&ignored).unwrap();
+        std::fs::write(
+            ignored.join("forge.toml"),
+            "[service]\ntype = \"command\"\nup = \"echo inside\"\n",
+        )
+        .unwrap();
+
+        let mut services = HashMap::new();
+        scan_directory(root.path(), root.path(), "", &["node_modules".to_string()], &mut services, 0).unwrap();
+        assert!(services.is_empty(), "service inside an ignored directory must not be registered");
+    }
+
+    #[test]
+    fn test_scan_directory_ignores_glob_pattern() {
+        let root = tempfile::tempdir().unwrap();
+        let dist = root.path().join("dist-prod");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::write(
+            dist.join("forge.toml"),
+            "[service]\ntype = \"command\"\nup = \"echo built\"\n",
+        )
+        .unwrap();
+
+        let mut services = HashMap::new();
+        scan_directory(root.path(), root.path(), "", &["dist*".to_string()], &mut services, 0).unwrap();
+        assert!(services.is_empty(), "service inside a glob-matched directory must not be registered");
+    }
+
+    #[test]
+    fn test_scan_directory_registers_non_ignored_service() {
+        let root = tempfile::tempdir().unwrap();
+        let svc_dir = root.path().join("api");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        std::fs::write(
+            svc_dir.join("forge.toml"),
+            "[service]\ntype = \"command\"\nup = \"echo api\"\n",
+        )
+        .unwrap();
+
+        let mut services = HashMap::new();
+        scan_directory(root.path(), root.path(), "", &["node_modules".to_string()], &mut services, 0).unwrap();
+        assert!(services.contains_key("api"), "non-ignored service must be registered");
+    }
+
+    // ── resolve_service_env: priority ─────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_service_env_workspace_env_applied() {
+        let root = tempfile::tempdir().unwrap();
+        let svc_dir = root.path().join("api");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+
+        let ws = make_workspace_with_env([("LOG_LEVEL".to_string(), "debug".to_string())].into());
+        let mut services = HashMap::from([(
+            "api".to_string(),
+            ResolvedService {
+                name: "api".to_string(),
+                config: make_service_config(),
+                dir: svc_dir.clone(),
+            },
+        )]);
+        resolve_service_env(&ws, &mut services);
+        assert_eq!(services["api"].config.env.get("LOG_LEVEL").map(String::as_str), Some("debug"));
+    }
+
+    #[test]
+    fn test_resolve_service_env_service_level_overrides_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let svc_dir = root.path().join("api");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+
+        let ws = make_workspace_with_env([("LOG_LEVEL".to_string(), "debug".to_string())].into());
+        let mut svc_config = make_service_config();
+        svc_config.env.insert("LOG_LEVEL".to_string(), "error".to_string());
+
+        let mut services = HashMap::from([(
+            "api".to_string(),
+            ResolvedService { name: "api".to_string(), config: svc_config, dir: svc_dir },
+        )]);
+        resolve_service_env(&ws, &mut services);
+        assert_eq!(
+            services["api"].config.env.get("LOG_LEVEL").map(String::as_str),
+            Some("error"),
+            "service-level env must override workspace env"
+        );
+    }
+
+    #[test]
+    fn test_resolve_service_env_env_file_overrides_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let svc_dir = root.path().join("api");
+        std::fs::create_dir_all(&svc_dir).unwrap();
+        // .env file with a value that differs from workspace env
+        std::fs::write(svc_dir.join(".env"), "LOG_LEVEL=warn\n").unwrap();
+
+        let ws = make_workspace_with_env([("LOG_LEVEL".to_string(), "debug".to_string())].into());
+        let mut svc_config = make_service_config();
+        svc_config.env_file = Some(".env".to_string());
+
+        let mut services = HashMap::from([(
+            "api".to_string(),
+            ResolvedService { name: "api".to_string(), config: svc_config, dir: svc_dir },
+        )]);
+        resolve_service_env(&ws, &mut services);
+        assert_eq!(
+            services["api"].config.env.get("LOG_LEVEL").map(String::as_str),
+            Some("warn"),
+            "env_file must override workspace env"
+        );
+    }
+
+    fn make_workspace_with_env(env: HashMap<String, String>) -> WorkspaceConfig {
+        WorkspaceConfig {
+            workspace: super::super::workspace::WorkspaceSection {
+                name: "test".to_string(),
+                description: None,
+                zones: None,
+                ignore: None,
+                ignore_override: None,
+                parallel_startup: true,
+                hints: vec![],
+                env,
+            },
+            groups: HashMap::new(),
+            commands: HashMap::new(),
+        }
+    }
+
+    fn make_service_config() -> crate::config::ServiceConfig {
+        crate::config::ServiceConfig {
+            port: None,
+            groups: vec![],
+            depends_on: vec![],
+            health: None,
+            env: HashMap::new(),
+            env_file: None,
+            up: Some("echo test".to_string()),
+            down: None,
+            build: None,
+            dev: None,
+            logs: None,
+            cwd: None,
+            args: None,
+            autorestart: true,
+            max_restarts: 10,
+            restart_delay: 3,
+            kill_timeout: 10,
+            treekill: true,
+            attach: false,
+            max_memory: None,
+            mode: crate::config::ServiceMode::Service,
+            commands: HashMap::new(),
+        }
+    }
 }

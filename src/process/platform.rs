@@ -535,6 +535,8 @@ fn extract_host_port(mapping: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
+    use super::get_process_tree;
 
     #[test]
     fn test_current_process_is_alive() {
@@ -615,5 +617,162 @@ services:
         assert_eq!(extract_host_port("127.0.0.1:5432:5432"), Some(5432));
         assert_eq!(extract_host_port("3000"), Some(3000));
         assert_eq!(extract_host_port("8080:80/tcp"), Some(8080));
+    }
+
+    #[test]
+    fn test_extract_host_port_udp_suffix() {
+        assert_eq!(extract_host_port("53:53/udp"), Some(53));
+    }
+
+    #[test]
+    fn test_extract_host_port_invalid_returns_none() {
+        assert_eq!(extract_host_port("not-a-port"), None);
+        assert_eq!(extract_host_port(""), None);
+        assert_eq!(extract_host_port(":"), None);
+    }
+
+    #[test]
+    fn test_extract_host_port_too_many_parts_returns_none() {
+        // 4 or more colon-separated segments → None
+        assert_eq!(extract_host_port("a:b:c:d"), None);
+    }
+
+    // ── get_process_tree ──────────────────────────────────────────────────────
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_get_process_tree_includes_self() {
+        let pid = std::process::id();
+        let tree = get_process_tree(pid);
+        assert!(
+            tree.contains(&pid),
+            "process tree must include the root PID itself"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_get_process_tree_no_duplicates() {
+        let pid = std::process::id();
+        let mut tree = get_process_tree(pid);
+        let original_len = tree.len();
+        tree.sort();
+        tree.dedup();
+        assert_eq!(original_len, tree.len(), "process tree must not contain duplicate PIDs");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_get_process_tree_nonexistent_pid_still_contains_root() {
+        // A PID astronomically unlikely to exist
+        let fake_pid: u32 = 4_294_967_290;
+        let tree = get_process_tree(fake_pid);
+        assert!(
+            tree.contains(&fake_pid),
+            "tree must contain the requested root even if the process doesn't exist"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_get_process_tree_pid_zero_does_not_panic() {
+        // PID 0 is special (kernel); just verify no panic
+        let _ = get_process_tree(0);
+    }
+
+    // ── parse_proc_tcp_listen (Linux only) ───────────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    mod proc_tcp_tests {
+        use super::super::parse_proc_tcp_listen;
+        use std::collections::HashSet;
+
+        fn iset(inodes: &[u64]) -> HashSet<u64> {
+            inodes.iter().copied().collect()
+        }
+
+        /// Minimal /proc/net/tcp data line: hex_port in local_address, state, inode.
+        fn tcp_line(hex_port: &str, state: &str, inode: u64) -> String {
+            format!(
+                "   0: 00000000:{hex_port} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000     0        0 {inode} 1 0000000000000000 100 0 0 10 0"
+            )
+        }
+
+        #[test]
+        fn test_listen_entry_extracted() {
+            // 0x1F90 = 8080
+            let content = format!("  sl  local_address ...\n{}\n", tcp_line("1F90", "0A", 12345));
+            let ports = parse_proc_tcp_listen(&content, &iset(&[12345]));
+            assert_eq!(ports, vec![0x1F90u16]);
+        }
+
+        #[test]
+        fn test_non_listen_state_skipped() {
+            // State 01 = ESTABLISHED, not LISTEN
+            let content = format!("  sl  ...\n{}\n", tcp_line("1F90", "01", 12345));
+            let ports = parse_proc_tcp_listen(&content, &iset(&[12345]));
+            assert!(ports.is_empty());
+        }
+
+        #[test]
+        fn test_unknown_inode_skipped() {
+            let content = format!("  sl  ...\n{}\n", tcp_line("1F90", "0A", 99999));
+            // Our inode set only has 12345
+            let ports = parse_proc_tcp_listen(&content, &iset(&[12345]));
+            assert!(ports.is_empty());
+        }
+
+        #[test]
+        fn test_port_zero_skipped() {
+            let content = format!("  sl  ...\n{}\n", tcp_line("0000", "0A", 12345));
+            let ports = parse_proc_tcp_listen(&content, &iset(&[12345]));
+            assert!(ports.is_empty());
+        }
+
+        #[test]
+        fn test_multiple_inodes_same_port_deduplicated() {
+            // Two entries with the same port but different inodes → appears only once
+            let line1 = tcp_line("1F90", "0A", 11111);
+            let line2 = tcp_line("1F90", "0A", 22222);
+            let content = format!("  sl  ...\n{}\n{}\n", line1, line2);
+            let ports = parse_proc_tcp_listen(&content, &iset(&[11111, 22222]));
+            assert_eq!(ports.len(), 1, "duplicate port must appear only once");
+            assert_eq!(ports[0], 0x1F90);
+        }
+
+        #[test]
+        fn test_multiple_distinct_ports_all_collected() {
+            let line1 = tcp_line("1F90", "0A", 11111); // 8080
+            let line2 = tcp_line("0CEA", "0A", 22222); // 3306
+            let content = format!("  sl  ...\n{}\n{}\n", line1, line2);
+            let ports = parse_proc_tcp_listen(&content, &iset(&[11111, 22222]));
+            assert_eq!(ports.len(), 2);
+            assert!(ports.contains(&0x1F90));
+            assert!(ports.contains(&0x0CEA));
+        }
+
+        #[test]
+        fn test_header_line_skipped_by_skip1() {
+            // parse_proc_tcp_listen skips the first line (header)
+            let content = format!(
+                "  sl  local_address rem_address   st ...\n{}\n",
+                tcp_line("1F90", "0A", 12345)
+            );
+            let ports = parse_proc_tcp_listen(&content, &iset(&[12345]));
+            assert_eq!(ports, vec![0x1F90u16]);
+        }
+
+        #[test]
+        fn test_empty_content_returns_empty() {
+            let ports = parse_proc_tcp_listen("", &iset(&[12345]));
+            assert!(ports.is_empty());
+        }
+
+        #[test]
+        fn test_empty_inode_set_returns_empty() {
+            let content = format!("  sl  ...\n{}\n", tcp_line("1F90", "0A", 12345));
+            let ports = parse_proc_tcp_listen(&content, &iset(&[]));
+            assert!(ports.is_empty());
+        }
     }
 }
