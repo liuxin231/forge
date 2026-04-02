@@ -257,20 +257,35 @@ async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -
 
                 // Detect the port the service is actually listening on.
                 // Filter out the supervisor's own port in case the child inherited the socket.
-                // Falls back to docker-compose.yml port parsing, then config.port.
-                let detected_port = pid
-                    .and_then(|p| {
-                        platform::detect_listening_ports(p)
-                            .into_iter()
-                            .find(|&port| port != supervisor_port)
-                    })
-                    .or_else(|| {
-                        platform::detect_docker_compose_port(
-                            &svc_config.dir,
-                            &svc_config.config.up,
-                        )
-                    })
-                    .or(svc_config.config.port);
+                // Retry with backoff: some services (e.g. rsbuild) finish health checks before
+                // they have bound their listen socket, so a single probe would miss the port.
+                // We retry for up to PORT_DETECT_TIMEOUT_MS, then fall back.
+                const PORT_DETECT_INTERVAL_MS: u64 = 300;
+                const PORT_DETECT_TIMEOUT_MS: u64 = 5_000;
+                let detected_port = 'detect: {
+                    if let Some(p) = pid {
+                        let attempts = PORT_DETECT_TIMEOUT_MS / PORT_DETECT_INTERVAL_MS;
+                        for attempt in 0..=attempts {
+                            let ports = platform::detect_listening_ports(p);
+                            if let Some(port) =
+                                ports.into_iter().find(|&pp| pp != supervisor_port)
+                            {
+                                break 'detect Some(port);
+                            }
+                            if attempt < attempts {
+                                tokio::time::sleep(
+                                    std::time::Duration::from_millis(PORT_DETECT_INTERVAL_MS),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    platform::detect_docker_compose_port(
+                        &svc_config.dir,
+                        &svc_config.config.up,
+                    )
+                    .or(svc_config.config.port)
+                };
 
                 let mut tracker = RestartTracker::new(
                     svc_config.config.autorestart,
