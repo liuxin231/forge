@@ -44,14 +44,16 @@ pub async fn wait_healthy(
             );
         }
 
-        // Resolve port: use configured hint first, then auto-detect from PID
-        let effective_port = port_hint.or_else(|| {
-            pid.and_then(|p| {
+        // Resolve port: prefer the port the process is actually listening on (lsof),
+        // fall back to the configured port hint. This handles dev servers (e.g. rsbuild)
+        // that auto-switch to another port when the configured one is occupied.
+        let effective_port = pid
+            .and_then(|p| {
                 crate::process::platform::detect_listening_ports(p)
                     .into_iter()
                     .next()
             })
-        });
+            .or(port_hint);
 
         let healthy = if let Some(http_path) = &health.http {
             check_http(effective_port, http_path).await
