@@ -251,3 +251,111 @@ pub fn print_up_table(statuses: &[ServiceStatus]) -> Result<()> {
     eprintln!("{}", table);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    // ── ASCII behaviour ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_truncate_short_string_returned_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact_byte_length_returned_unchanged() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_one_byte_over_appends_ellipsis() {
+        // max=5 → end=4 → "hell…"
+        assert_eq!(truncate("hello!", 5), "hell…");
+    }
+
+    #[test]
+    fn test_truncate_max_two_ascii() {
+        // max=2 → end=1 → "a…"
+        assert_eq!(truncate("abc", 2), "a…");
+    }
+
+    #[test]
+    fn test_truncate_empty_string_returned_unchanged() {
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn test_truncate_max_zero_returns_dot() {
+        assert_eq!(truncate("anything", 0), ".");
+    }
+
+    #[test]
+    fn test_truncate_max_one_returns_dot() {
+        assert_eq!(truncate("anything", 1), ".");
+    }
+
+    #[test]
+    fn test_truncate_empty_string_max_zero_returns_dot() {
+        assert_eq!(truncate("", 0), ".");
+    }
+
+    // ── Multibyte / UTF-8 boundary safety ────────────────────────────────────
+
+    #[test]
+    fn test_truncate_chinese_single_char_fits_exactly() {
+        // "中" = 3 bytes; max=3 → s.len()=3 <= 3 → unchanged
+        assert_eq!(truncate("中", 3), "中");
+    }
+
+    #[test]
+    fn test_truncate_chinese_cuts_cleanly_between_chars() {
+        // "中文" = 6 bytes; max=4 → end=3 → char boundary → "中…"
+        let result = truncate("中文", 4);
+        assert_eq!(result, "中…");
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_truncate_mid_char_byte_steps_back_to_boundary() {
+        // "日本語" — each char is 3 bytes.
+        // max=5 → end=4 → not a char boundary (inside "本") → step to 3 → "日…"
+        let result = truncate("日本語", 5);
+        assert_eq!(result, "日…");
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_truncate_4byte_emoji_rolls_back_to_zero() {
+        // "🎉" = 4 bytes (F0 9F 8E 89). max=3 → end=2,1 → not boundary → end=0 → "…"
+        let result = truncate("🎉test", 3);
+        assert_eq!(result, "…");
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_truncate_mixed_ascii_and_multibyte() {
+        // "abc中" = 6 bytes; max=4 → end=3 → char boundary → "abc…"
+        let result = truncate("abc中", 4);
+        assert_eq!(result, "abc…");
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_truncate_output_is_always_valid_utf8() {
+        // Property: for any of these inputs and any max value, output is valid UTF-8
+        let inputs = ["", "a", "hello", "中文", "日本語テスト", "🎉🚀", "apps/api"];
+        for s in inputs {
+            for max in 0..=12usize {
+                let result = truncate(s, max);
+                assert!(
+                    std::str::from_utf8(result.as_bytes()).is_ok(),
+                    "truncate({:?}, {}) produced invalid UTF-8: {:?}",
+                    s,
+                    max,
+                    result
+                );
+            }
+        }
+    }
+}

@@ -106,6 +106,94 @@ impl SupervisorClient {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::collector::LogLine;
+
+    // ── Timeout constants ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_long_timeout_greater_than_default() {
+        assert!(
+            READ_TIMEOUT_LONG > READ_TIMEOUT_DEFAULT,
+            "Up/Restart must use a longer timeout than regular commands"
+        );
+    }
+
+    #[test]
+    fn test_default_timeout_at_least_five_seconds() {
+        assert!(READ_TIMEOUT_DEFAULT.as_secs() >= 5);
+    }
+
+    #[test]
+    fn test_long_timeout_at_least_sixty_seconds() {
+        // health checks during `up` can take a while
+        assert!(READ_TIMEOUT_LONG.as_secs() >= 60);
+    }
+
+    // ── print_log_line ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_print_log_line_empty_fields_no_panic() {
+        let line = LogLine {
+            service: String::new(),
+            stream: "stdout".to_string(),
+            message: String::new(),
+            timestamp: String::new(),
+        };
+        print_log_line(&line); // must not panic
+    }
+
+    #[test]
+    fn test_print_log_line_with_timestamp_no_panic() {
+        let line = LogLine {
+            service: "api".to_string(),
+            stream: "stdout".to_string(),
+            message: "server started".to_string(),
+            timestamp: "10:30:00".to_string(),
+        };
+        print_log_line(&line);
+    }
+
+    #[test]
+    fn test_print_log_line_without_timestamp_no_panic() {
+        let line = LogLine {
+            service: "api".to_string(),
+            stream: "stderr".to_string(),
+            message: "warning: disk low".to_string(),
+            timestamp: String::new(),
+        };
+        print_log_line(&line);
+    }
+
+    #[test]
+    fn test_print_log_line_all_six_color_branches_no_panic() {
+        // The color array has 6 entries. Exercise every hash bucket (0–5) to ensure
+        // no branch is accidentally unreachable or panics.
+        let color_count = 6usize;
+        let mut hit = vec![false; color_count];
+        for i in 0u32..=255 {
+            let name = format!("{}", i);
+            let idx = name.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize)) % color_count;
+            if !hit[idx] {
+                hit[idx] = true;
+                let line = LogLine {
+                    service: name,
+                    stream: "stdout".to_string(),
+                    message: "test".to_string(),
+                    timestamp: String::new(),
+                };
+                print_log_line(&line);
+            }
+            if hit.iter().all(|&x| x) {
+                break;
+            }
+        }
+        assert!(hit.iter().all(|&x| x), "not all 6 color branches were exercised");
+    }
+}
+
 fn print_log_line(line: &LogLine) {
     use colored::Colorize;
 

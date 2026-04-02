@@ -252,6 +252,118 @@ pub fn print_service_inspect(detail: &crate::inspect::ServiceInspect) {
     eprintln!();
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supervisor::protocol::{HealthStatus, ProcessStatus, Response, ServiceStatus};
+
+    fn error_response(msg: &str) -> Response {
+        Response::Error(msg.to_string())
+    }
+
+    fn services_response() -> Response {
+        Response::Services(vec![ServiceStatus {
+            name: "api".to_string(),
+            port: Some(8080),
+            status: ProcessStatus::Running,
+            health: HealthStatus::Healthy,
+            pid: Some(1234),
+            restarts: 0,
+        }])
+    }
+
+    // ── print_up_result ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_print_up_result_error_propagates_as_err() {
+        let result = print_up_result(&error_response("start failed"), false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("start failed"));
+    }
+
+    #[test]
+    fn test_print_up_result_unexpected_ok_variant_returns_ok() {
+        // Response::Ok is unexpected here but must not crash — only warn
+        let result = print_up_result(&Response::Ok, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_print_up_result_json_mode_with_services_returns_ok() {
+        let result = print_up_result(&services_response(), true);
+        assert!(result.is_ok());
+    }
+
+    // ── print_down_result ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_print_down_result_ok_text_mode_returns_ok() {
+        let result = print_down_result(&Response::Ok, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_print_down_result_ok_json_mode_returns_ok() {
+        let result = print_down_result(&Response::Ok, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_print_down_result_error_propagates_as_err() {
+        let result = print_down_result(&error_response("stop failed"), false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("stop failed"));
+    }
+
+    #[test]
+    fn test_print_down_result_unexpected_services_variant_returns_ok() {
+        // Services is an unexpected variant for down; must not crash — only warn
+        let result = print_down_result(&services_response(), false);
+        assert!(result.is_ok());
+    }
+
+    // ── print_restart_result ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_print_restart_result_delegates_to_up_path() {
+        // restart reuses up display; error must still propagate
+        let result = print_restart_result(&error_response("restart failed"), false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("restart failed"));
+    }
+
+    // ── print_hints ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_print_hints_empty_slice_is_noop() {
+        print_hints(&[]);
+    }
+
+    #[test]
+    fn test_print_hints_with_sections_does_not_panic() {
+        use crate::config::workspace::{HintItem, HintSection};
+        let sections = vec![HintSection {
+            title: Some("Dev servers".to_string()),
+            items: vec![
+                HintItem { label: "admin".to_string(), value: "http://localhost:3001".to_string() },
+                HintItem { label: "api".to_string(),   value: "http://localhost:9000".to_string() },
+            ],
+        }];
+        // Must not panic regardless of unequal label widths
+        print_hints(&sections);
+    }
+
+    #[test]
+    fn test_print_hints_section_without_title_does_not_panic() {
+        use crate::config::workspace::{HintItem, HintSection};
+        let sections = vec![HintSection {
+            title: None,
+            items: vec![HintItem { label: "url".to_string(), value: "http://x".to_string() }],
+        }];
+        print_hints(&sections);
+    }
+}
+
 pub fn print_log_lines(lines: &[LogLine], json_mode: bool) -> Result<()> {
     if json_mode {
         println!("{}", serde_json::to_string_pretty(lines)?);
