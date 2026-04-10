@@ -155,15 +155,26 @@ async fn cmd_up(targets: Vec<String>, attach: Option<Vec<String>>, json: bool) -
 
                     match response {
                         Response::Services(statuses) => {
+                            let mut failed = Vec::new();
                             for s in &statuses {
                                 match s.health {
                                     supervisor::protocol::HealthStatus::Healthy => {
                                         list.set_healthy(&s.name, s.port);
                                     }
-                                    _ => list.set_unhealthy(&s.name),
+                                    _ => {
+                                        list.set_unhealthy(&s.name);
+                                        failed.push(s.name.clone());
+                                    }
                                 }
                             }
                             list.render();
+                            if !failed.is_empty() {
+                                list.print_summary("up");
+                                anyhow::bail!(
+                                    "Service(s) failed to become healthy: {}. Dependent services will not be started.",
+                                    failed.join(", ")
+                                );
+                            }
                         }
                         Response::Error(e) => {
                             for name in level {
