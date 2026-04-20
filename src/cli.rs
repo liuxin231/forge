@@ -26,6 +26,10 @@ pub enum Command {
 
         /// Attach to terminal. Without value: attach services with attach=true in config (or all if none configured).
         /// With values: attach only the specified services, e.g. --attach gateway/api
+        ///
+        /// NOTE: use the space-separated form for multiple targets — `--attach gateway/api iam/api`.
+        /// The `--attach=VALUE` form takes exactly one value; any extra names following it become
+        /// positional `targets` instead of attach targets.
         #[arg(long, num_args = 0..)]
         attach: Option<Vec<String>>,
 
@@ -159,6 +163,12 @@ pub enum Command {
         parallel: Option<bool>,
     },
 
+    /// Inspect or clear the on-disk command cache
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+
     /// Uninstall fr (remove binary, backups, and optionally clean up PATH)
     Uninstall,
 
@@ -191,4 +201,18 @@ pub enum Command {
     /// Run a user-defined command by name (e.g. `fr migrate`, `fr lint`)
     #[command(external_subcommand)]
     External(Vec<String>),
+}
+
+#[derive(Subcommand)]
+pub enum CacheAction {
+    /// Delete cached command results (forces next `fr run` to re-execute).
+    ///
+    /// Without `--service`: wipes the entire workspace cache dir.
+    /// With `--service NAME`: wipes only that service's entries. Glob/group
+    /// patterns (e.g. `gateway/*`) are resolved the same way as `fr run`.
+    Clear {
+        /// Limit clear to one service or target pattern
+        #[arg(long, value_name = "NAME")]
+        service: Option<String>,
+    },
 }

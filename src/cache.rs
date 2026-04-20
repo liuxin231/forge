@@ -56,6 +56,35 @@ fn entry_path(cache_root: &Path, service: &str, command: &str) -> PathBuf {
     cache_root.join(sanitized).join(format!("{}.json", command))
 }
 
+/// Apply the sanitization used by `entry_path` to a service name so CLI
+/// callers can target a specific subdirectory under the cache root.
+pub fn sanitize_service_for_cache(service: &str) -> String {
+    service.replace('/', "-").replace(['\\', ':'], "-")
+}
+
+/// Delete cached command results.
+///
+/// - `service = None`: removes the entire cache root directory.
+/// - `service = Some(name)`: removes only that service's cache subdirectory.
+///
+/// Returns `Ok(())` even if the target didn't exist — "clear" is idempotent.
+pub fn clear(cache_root: &Path, service: Option<&str>) -> Result<()> {
+    let target = match service {
+        Some(name) => cache_root.join(sanitize_service_for_cache(name)),
+        None => cache_root.to_path_buf(),
+    };
+
+    match std::fs::remove_dir_all(&target) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::anyhow!(
+            "Failed to clear cache at {}: {}",
+            target.display(),
+            e
+        )),
+    }
+}
+
 pub fn read_cache(cache_root: &Path, service: &str, command: &str) -> Option<CacheEntry> {
     let path = entry_path(cache_root, service, command);
     let content = std::fs::read_to_string(path).ok()?;
@@ -111,6 +140,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = compute_inputs_hash(dir.path(), &[]).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_clear_removes_service_subdir_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Populate two services; only one should disappear after a targeted clear.
+        write_cache(root, "svc-a", "build", "hash-a").unwrap();
+        write_cache(root, "svc-b", "build", "hash-b").unwrap();
+        assert!(read_cache(root, "svc-a", "build").is_some());
+        assert!(read_cache(root, "svc-b", "build").is_some());
+
+        clear(root, Some("svc-a")).unwrap();
+
+        assert!(read_cache(root, "svc-a", "build").is_none());
+        assert!(read_cache(root, "svc-b", "build").is_some());
+    }
+
+    #[test]
+    fn test_clear_missing_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        // No cache has ever been written — clearing must not error.
+        clear(dir.path(), None).unwrap();
+        clear(dir.path(), Some("does-not-exist")).unwrap();
     }
 
     #[test]
