@@ -419,12 +419,35 @@ fn print_log_line_colored(line: &crate::log::collector::LogLine) {
     }
 }
 
+/// Register a one-shot Ctrl+C callback for the current attached session.
+///
+/// `ctrlc::set_handler` can only succeed once per process: a second call is a
+/// no-op (returns Err which we silently ignored). This wrapper registers a
+/// single process-wide dispatcher on first use and then swaps callbacks in a
+/// shared slot. Repeated calls (e.g. two `run_mixed_mode` invocations in the
+/// same process, or library use) now cleanly replace the previous callback
+/// instead of silently leaking the old handler.
 fn ctrlc_handler<F: FnOnce() + Send + 'static>(f: F) {
-    let f = std::sync::Mutex::new(Some(f));
-    let _ = ctrlc::set_handler(move || {
-        if let Ok(mut guard) = f.lock()
-            && let Some(f) = guard.take() {
-                f();
+    use std::sync::{Mutex, OnceLock};
+
+    type CtrlcCallback = Box<dyn FnOnce() + Send + 'static>;
+    static SLOT: OnceLock<Mutex<Option<CtrlcCallback>>> = OnceLock::new();
+
+    let slot = SLOT.get_or_init(|| {
+        // Fires on the signal thread. Consumes whatever FnOnce is currently
+        // parked; if the slot is empty (e.g. shutdown already fired), no-op.
+        let _ = ctrlc::set_handler(|| {
+            if let Some(slot) = SLOT.get()
+                && let Ok(mut guard) = slot.lock()
+                && let Some(cb) = guard.take()
+            {
+                cb();
             }
+        });
+        Mutex::new(None)
     });
+
+    if let Ok(mut guard) = slot.lock() {
+        *guard = Some(Box::new(f));
+    }
 }
