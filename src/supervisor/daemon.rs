@@ -170,8 +170,16 @@ fn kill_stale_services(workspace_root: &Path) {
             {
                 use nix::sys::signal::{self, Signal};
                 use nix::unistd::Pid;
-                if let Ok(pgid) = i32::try_from(pid) {
-                    let _ = signal::kill(Pid::from_raw(-pgid), Signal::SIGKILL);
+                match i32::try_from(pid) {
+                    Ok(pgid) => {
+                        let _ = signal::kill(Pid::from_raw(-pgid), Signal::SIGKILL);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "Skipping stale service kill: pid {} overflows i32",
+                            pid
+                        );
+                    }
                 }
             }
             #[cfg(not(unix))]

@@ -17,6 +17,23 @@ pub struct LogLine {
 pub const RING_BUFFER_CAPACITY: usize = 10_000;
 pub type LogBuffer = Arc<Mutex<HashMap<String, VecDeque<LogLine>>>>;
 
+/// Default capacity for the supervisor's log broadcast channel.
+/// Every service's stdout/stderr flows through a single broadcast channel;
+/// when consumers (e.g. `fr logs --follow`) can't drain fast enough, lines
+/// past this cap are dropped with a "Lagged" warning. Large projects with
+/// many chatty services can override via `FORGE_LOG_CAP`.
+pub const LOG_BROADCAST_CAPACITY: usize = 10_000;
+
+/// Read the configured log broadcast capacity, honoring `FORGE_LOG_CAP`.
+/// Invalid or zero values fall back to the default.
+pub fn log_broadcast_capacity() -> usize {
+    std::env::var("FORGE_LOG_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(LOG_BROADCAST_CAPACITY)
+}
+
 /// Start collecting logs from a child process.
 /// Lines are broadcast to all subscribers and, if `buffer` is provided,
 /// appended to the in-memory ring buffer.
