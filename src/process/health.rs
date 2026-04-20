@@ -70,6 +70,29 @@ pub async fn wait_healthy(
         };
 
         if healthy {
+            // TOCTOU guard: for HTTP checks, confirm the port we just probed
+            // is still owned by the same PID we started. Between port lookup
+            // and response arrival the service could have exited and something
+            // else (another dev server, a sidecar, even the supervisor
+            // looping) could have bound the port — without this check we'd
+            // report the wrong service as healthy on the wrong port.
+            if health.http.is_some() {
+                if let (Some(p), Some(port)) = (pid, effective_port) {
+                    let still_ours = crate::process::platform::detect_listening_ports(p)
+                        .into_iter()
+                        .any(|owned| owned == port);
+                    if !still_ours {
+                        tracing::warn!(
+                            "'{}' port {} no longer owned by PID {} after health probe; retrying",
+                            service_name,
+                            port,
+                            p
+                        );
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    }
+                }
+            }
             tracing::info!("'{}' is healthy", service_name);
             // For HTTP checks return the port we actually connected to so callers
             // can display it without re-running port detection.

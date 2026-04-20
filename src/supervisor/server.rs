@@ -408,18 +408,39 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
     }; // lock released here
 
     // Phase 2: kill processes and run down commands sequentially without holding the lock.
+    // Collect any down-cmd failures so `fr down` can surface them to the user
+    // instead of pretending everything succeeded.
+    let mut down_failures: Vec<String> = Vec::new();
     for task in &stop_tasks {
         if let Some(pid) = task.pid {
             let _ = platform::stop_process(pid, task.kill_timeout, task.treekill).await;
         }
         if let Some(cmd) = &task.down_cmd {
             tracing::info!("Running down command for '{}': {}", task.name, cmd);
-            let _ = tokio::process::Command::new("sh")
+            match tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(cmd)
                 .current_dir(&task.svc_dir)
                 .status()
-                .await;
+                .await
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    let code = status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".to_string());
+                    tracing::error!(
+                        "down command for '{}' exited with status {}",
+                        task.name, code
+                    );
+                    down_failures.push(format!("{} (exit {})", task.name, code));
+                }
+                Err(e) => {
+                    tracing::error!("down command for '{}' failed to spawn: {}", task.name, e);
+                    down_failures.push(format!("{} ({})", task.name, e));
+                }
+            }
         }
     }
 
@@ -429,7 +450,14 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
         trigger_shutdown_if_all_stopped(&mut guard);
     }
 
-    Response::Ok
+    if down_failures.is_empty() {
+        Response::Ok
+    } else {
+        Response::Error(format!(
+            "down command failed for: {}",
+            down_failures.join(", ")
+        ))
+    }
 }
 
 async fn handle_restart(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {
