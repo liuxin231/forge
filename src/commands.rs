@@ -184,8 +184,15 @@ async fn execute_service_command(
         let concurrency = opts.concurrency.unwrap_or(usize::MAX);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut handles: Vec<(String, tokio::task::JoinHandle<(bool, bool, u64, String)>)> =
-            Vec::new();
+
+        // JoinSet lets us react to tasks in *completion* order. The previous
+        // Vec<JoinHandle> + sequential `.await?` walk blocked cancel propagation
+        // behind whichever task was first in spawn order — if that task was
+        // slow and a later task failed fast, siblings kept running long after
+        // they should have been cancelled. fail_fast now takes effect the
+        // instant any task reports failure.
+        let mut set: tokio::task::JoinSet<(String, bool, bool, u64, String)> =
+            tokio::task::JoinSet::new();
 
         for svc_name in &ordered {
             let svc = match project.services.get(svc_name) {
@@ -198,42 +205,59 @@ async fn execute_service_command(
             let token = cancel.clone();
             let sem = semaphore.clone();
             let verbose = opts.verbose;
+            let name_owned = svc_name.clone();
 
-            handles.push((
-                svc_name.clone(),
-                tokio::spawn(async move {
-                    let _permit = sem.acquire_owned().await.unwrap();
-                    let start = Instant::now();
-                    let res = tokio::select! {
-                        r = run_service_command(&svc, &cmd_name, &root, &cache_root, verbose) => r,
-                        _ = token.cancelled() => Err(anyhow::anyhow!("cancelled")),
-                    };
-                    let elapsed = start.elapsed().as_millis() as u64;
-                    let (success, cache_hit, msg) = match res {
-                        Ok(hit) => (true, hit, "ok".to_string()),
-                        Err(e) => (false, false, e.to_string()),
-                    };
-                    (success, cache_hit, elapsed, msg)
-                }),
-            ));
+            set.spawn(async move {
+                let _permit = sem.acquire_owned().await.unwrap();
+                let start = Instant::now();
+                let res = tokio::select! {
+                    r = run_service_command(&svc, &cmd_name, &root, &cache_root, verbose) => r,
+                    _ = token.cancelled() => Err(anyhow::anyhow!("cancelled")),
+                };
+                let elapsed = start.elapsed().as_millis() as u64;
+                let (success, cache_hit, msg) = match res {
+                    Ok(hit) => (true, hit, "ok".to_string()),
+                    Err(e) => (false, false, e.to_string()),
+                };
+                (name_owned, success, cache_hit, elapsed, msg)
+            });
         }
 
-        for (svc_name, handle) in handles {
-            let (success, cache_hit, elapsed_ms, message) = handle.await?;
+        // Results stream in as tasks finish. Print immediately (useful signal
+        // in an interactive run), but also buffer into a map so final `results`
+        // can be re-ordered to match the stable, topo-derived `ordered` list —
+        // downstream consumers (JSON output, summary table) get deterministic
+        // ordering regardless of completion timing.
+        let mut results_by_svc: std::collections::HashMap<
+            String,
+            (bool, bool, u64, String),
+        > = std::collections::HashMap::with_capacity(ordered.len());
+
+        while let Some(joined) = set.join_next().await {
+            let (svc_name, success, cache_hit, elapsed_ms, message) = joined?;
             if !opts.json {
                 print_service_result(&svc_name, name, success, cache_hit);
             }
-            results.push(CommandResult {
-                service: svc_name.clone(),
-                command: name.to_string(),
-                success,
-                cache_hit,
-                skipped: false,
-                duration_ms: elapsed_ms,
-                message,
-            });
-            if !success && fail_fast {
+            let should_cancel = !success && fail_fast;
+            results_by_svc.insert(svc_name, (success, cache_hit, elapsed_ms, message));
+            if should_cancel {
                 cancel.cancel();
+            }
+        }
+
+        for svc_name in &ordered {
+            if let Some((success, cache_hit, duration_ms, message)) =
+                results_by_svc.remove(svc_name)
+            {
+                results.push(CommandResult {
+                    service: svc_name.clone(),
+                    command: name.to_string(),
+                    success,
+                    cache_hit,
+                    skipped: false,
+                    duration_ms,
+                    message,
+                });
             }
         }
     } else {
