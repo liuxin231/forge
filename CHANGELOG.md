@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### BREAKING
+
+- **security(upgrade)**: `fr upgrade` now aborts if the release has no `checksums.txt`. Previously it warned and proceeded. Pass `--allow-unsigned` to opt in to the old behavior (for private/offline releases). Same policy applies to `install.sh`; honor env var `FORGE_ALLOW_UNSIGNED=1` or pass `--allow-unsigned`.
+- **security(install.sh)**: rustup bootstrap no longer uses `curl | sh`; the installer is downloaded to a temp file first and then executed, protecting against truncated-response execution.
+
 ## v0.1.12
 
 - fix(platform): fix lsof port parsing on macOS 26.4 beta where `-sTCP:LISTEN` still appends `(LISTEN)` token; now scans fields from end for first `addr:port` pattern
