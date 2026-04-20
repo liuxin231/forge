@@ -18,10 +18,23 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let cli = cli::Cli::parse();
     let verbose = cli.verbose;
+
+    // Let -v / -vv raise the default log level across every subcommand,
+    // not just `cmd_run`. We only seed a default when the user hasn't
+    // already configured RUST_LOG, so explicit overrides still win.
+    if std::env::var_os("RUST_LOG").is_none() {
+        let level = match verbose {
+            0 => "warn",
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        };
+        // SAFETY: set exactly once at startup before any thread reads env.
+        unsafe { std::env::set_var("RUST_LOG", format!("forge_cli={}", level)); }
+    }
+    tracing_subscriber::fmt::init();
 
     if let Some(dir) = &cli.directory {
         std::env::set_current_dir(dir)
@@ -75,6 +88,9 @@ async fn main() -> Result<()> {
         }
         cli::Command::Init { path, name, description, parallel } => {
             init::run(init::InitOptions { path, name, description, parallel })?;
+        }
+        cli::Command::Cache { action } => {
+            cmd_cache(action).await?;
         }
         cli::Command::Uninstall => {
             cmd_uninstall()?;
@@ -467,6 +483,34 @@ async fn cmd_run(
         },
     )
     .await
+}
+
+async fn cmd_cache(action: cli::CacheAction) -> Result<()> {
+    use colored::Colorize;
+
+    let workspace_root = find_workspace_root()?;
+    let project = config::load_project(&workspace_root)?;
+    let cache_root = cache::cache_root(&workspace_root);
+
+    match action {
+        cli::CacheAction::Clear { service: None } => {
+            cache::clear(&cache_root, None)?;
+            eprintln!("{} Cleared cache at {}", "✓".green().bold(), cache_root.display());
+        }
+        cli::CacheAction::Clear { service: Some(target) } => {
+            // Resolve to concrete service names so "gateway/*" works as expected.
+            let resolved = resolver::resolve_targets(&project, &[target.clone()])?;
+            if resolved.is_empty() {
+                anyhow::bail!("No services matched '{}'", target);
+            }
+            for name in &resolved {
+                cache::clear(&cache_root, Some(name))?;
+                eprintln!("{} Cleared cache for {}", "✓".green().bold(), name);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_uninstall() -> Result<()> {
