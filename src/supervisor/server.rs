@@ -28,7 +28,10 @@ struct ManagedService {
 
 struct SupervisorState {
     services: HashMap<String, ManagedService>,
-    project: ProjectConfig,
+    /// Shared, read-only project config. `Arc` avoids deep-cloning the full
+    /// config (services, workspace, etc.) for every handle_up/down — which
+    /// scaled linearly with number of services × connections.
+    project: Arc<ProjectConfig>,
     workspace_root: PathBuf,
     log_tx: broadcast::Sender<LogLine>,
     log_buffer: LogBuffer,
@@ -39,7 +42,7 @@ struct SupervisorState {
 
 pub async fn run_server(
     listener: TcpListener,
-    project: ProjectConfig,
+    project: Arc<ProjectConfig>,
     workspace_root: PathBuf,
 ) -> Result<()> {
     let (log_tx, _) = broadcast::channel::<LogLine>(10000);
@@ -188,7 +191,9 @@ async fn handle_connection(
 
 async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {
     let state_guard = state.lock().await;
-    let project = state_guard.project.clone();
+    // Cheap Arc clone — the Arc refactor replaces a full ProjectConfig deep copy
+    // here (full service map + every ResolvedService) with a refcount bump.
+    let project = Arc::clone(&state_guard.project);
     let workspace_root = state_guard.workspace_root.clone();
     let log_tx = state_guard.log_tx.clone();
     let log_buffer = state_guard.log_buffer.clone();

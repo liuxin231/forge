@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::Path;
+use std::sync::Arc;
 
 /// Get the port of a running supervisor, if any
 pub fn get_running_supervisor(workspace_root: &Path) -> Option<u16> {
@@ -28,7 +29,7 @@ pub async fn start_supervisor(workspace_root: &Path, _project: &crate::config::P
 
     // Kill any still-alive supervisor before starting a new one.
     // This prevents two supervisors competing for the same service ports.
-    kill_existing_supervisor(workspace_root);
+    kill_existing_supervisor(workspace_root).await;
 
     let exe = std::env::current_exe().context("Failed to find current executable")?;
 
@@ -82,7 +83,10 @@ pub async fn start_supervisor(workspace_root: &Path, _project: &crate::config::P
 
 /// Kill an existing supervisor process (if alive) before starting a fresh one.
 /// Reads supervisor.pid even if supervisor.port is missing (e.g. after trigger_shutdown cleanup).
-fn kill_existing_supervisor(workspace_root: &Path) {
+///
+/// Must be async: previously used `std::thread::sleep` between SIGTERM and the
+/// liveness re-check, which blocks the tokio worker thread that called us.
+async fn kill_existing_supervisor(workspace_root: &Path) {
     let pid_file = workspace_root.join(".forge/supervisor.pid");
     let pid_str = match std::fs::read_to_string(&pid_file) {
         Ok(s) => s,
@@ -107,14 +111,14 @@ fn kill_existing_supervisor(workspace_root: &Path) {
         let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
         // Wait up to 2 seconds for graceful exit
         for _ in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if !crate::process::platform::is_process_alive(pid) {
                 break;
             }
         }
         if crate::process::platform::is_process_alive(pid) {
             let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
     #[cfg(windows)]
@@ -122,7 +126,7 @@ fn kill_existing_supervisor(workspace_root: &Path) {
         let _ = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .output();
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
     cleanup_supervisor_files(workspace_root);
 }
@@ -212,13 +216,21 @@ pub async fn run_as_daemon(workspace_root: &Path) -> Result<()> {
         }
     }
 
-    // Write PID first, then port (clients poll for port file)
-    std::fs::write(forge_dir.join("supervisor.pid"), std::process::id().to_string())?;
-    std::fs::write(forge_dir.join("supervisor.port"), port.to_string())?;
+    // Write PID and port files atomically. A non-atomic write is readable as a
+    // zero-length file by get_running_supervisor during the write window,
+    // causing it to treat a live supervisor as dead.
+    crate::process::runner::atomic_write_string(
+        &forge_dir.join("supervisor.pid"),
+        &std::process::id().to_string(),
+    )?;
+    crate::process::runner::atomic_write_string(
+        &forge_dir.join("supervisor.port"),
+        &port.to_string(),
+    )?;
 
     tracing::info!("Supervisor daemon starting on port {}", port);
 
-    let result = super::server::run_server(listener, project, workspace_root.to_path_buf()).await;
+    let result = super::server::run_server(listener, Arc::new(project), workspace_root.to_path_buf()).await;
     // Clean up files on orderly exit so stale-check in get_running_supervisor works correctly.
     cleanup_supervisor_files(workspace_root);
     result
