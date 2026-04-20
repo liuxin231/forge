@@ -174,6 +174,11 @@ pub enum Command {
         /// Only check for updates, do not install
         #[arg(long)]
         check: bool,
+
+        /// Proceed even if checksums.txt is missing from the release (insecure).
+        /// By default, upgrade aborts when no checksum is available to verify the download.
+        #[arg(long)]
+        allow_unsigned: bool,
     },
 
     /// Internal: run as a background supervisor daemon (not for direct use)

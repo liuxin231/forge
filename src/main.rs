@@ -82,8 +82,8 @@ async fn main() -> Result<()> {
         cli::Command::Validate { json } => {
             cmd_validate(json)?;
         }
-        cli::Command::Upgrade { check } => {
-            upgrade::run(check).await?;
+        cli::Command::Upgrade { check, allow_unsigned } => {
+            upgrade::run(check, allow_unsigned).await?;
         }
         cli::Command::Supervisor { workspace_root } => {
             supervisor::daemon::run_as_daemon(&workspace_root).await?;
