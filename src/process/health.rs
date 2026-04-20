@@ -59,15 +59,7 @@ pub async fn wait_healthy(
             port_hint
         };
 
-        let healthy = if let Some(http_path) = &health.http {
-            check_http(effective_port, http_path).await
-        } else if let Some(cmd) = &health.cmd {
-            check_cmd(cmd, cwd).await
-        } else {
-            // No check configured — validation should catch this,
-            // but treat as healthy to avoid blocking
-            true
-        };
+        let healthy = probe_once(health, effective_port, cwd).await;
 
         if healthy {
             tracing::info!("'{}' is healthy", service_name);
@@ -156,6 +148,25 @@ async fn check_cmd(cmd: &crate::config::service::HealthCmd, cwd: &std::path::Pat
     }
 }
 
+/// Run one probe against `health`: HTTP if configured, else cmd, else treat as healthy.
+/// Extracted so `wait_healthy` (retry loop) and `check_health_once` (single-shot
+/// from `ps`) share one definition of "what does a healthy probe look like".
+async fn probe_once(
+    health: &crate::config::service::HealthConfig,
+    port: Option<u16>,
+    cwd: &std::path::Path,
+) -> bool {
+    if let Some(http_path) = &health.http {
+        check_http(port, http_path).await
+    } else if let Some(cmd) = &health.cmd {
+        check_cmd(cmd, cwd).await
+    } else {
+        // No check configured — validation should catch this,
+        // but treat as healthy to avoid blocking.
+        true
+    }
+}
+
 /// Perform a single health check (no retries, no timeout loop).
 /// Returns true if healthy, false otherwise.
 pub async fn check_health_once(
@@ -163,17 +174,9 @@ pub async fn check_health_once(
     health: &Option<crate::config::service::HealthConfig>,
     cwd: &std::path::Path,
 ) -> bool {
-    let health = match health {
-        Some(h) => h,
-        None => return true, // no health check configured = healthy
-    };
-
-    if let Some(http_path) = &health.http {
-        check_http(port, http_path).await
-    } else if let Some(cmd) = &health.cmd {
-        check_cmd(cmd, cwd).await
-    } else {
-        true
+    match health {
+        Some(h) => probe_once(h, port, cwd).await,
+        None => true, // no health check configured = healthy
     }
 }
 

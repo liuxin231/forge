@@ -107,7 +107,17 @@ pub fn is_process_alive(pid: u32) -> bool {
 
     let pid_i32 = match i32::try_from(pid) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => {
+            // Unix PIDs never exceed i32::MAX in practice, but if we ever get
+            // handed a u32 that doesn't fit, treat it as dead rather than
+            // silently returning false — the warning makes the impossible case
+            // observable instead of eating bugs.
+            tracing::warn!(
+                "is_process_alive called with pid {} which overflows i32; treating as dead",
+                pid
+            );
+            return false;
+        }
     };
 
     match signal::kill(Pid::from_raw(pid_i32), None) {
@@ -557,6 +567,14 @@ mod tests {
         // PID 0 is special (kernel), should not panic
         // On macOS, kill(0, 0) sends to own process group — we just test no panic
         let _ = is_process_alive(0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pid_overflow_is_not_alive() {
+        // u32::MAX > i32::MAX, must not silently succeed or panic.
+        // Covers the explicit-error path added for audit finding D7.
+        assert!(!is_process_alive(u32::MAX));
     }
 
     #[cfg(unix)]

@@ -42,7 +42,7 @@ pub async fn run_server(
     project: ProjectConfig,
     workspace_root: PathBuf,
 ) -> Result<()> {
-    let (log_tx, _) = broadcast::channel::<LogLine>(10000);
+    let (log_tx, _) = broadcast::channel::<LogLine>(crate::log::collector::log_broadcast_capacity());
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let supervisor_port = listener.local_addr()?.port();
     let log_buffer: LogBuffer = Arc::new(std::sync::Mutex::new(HashMap::new()));
