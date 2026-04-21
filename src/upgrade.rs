@@ -7,7 +7,7 @@ const GITHUB_RELEASES: &str = "https://github.com/liuxin231/forge/releases";
 /// Current binary version from Cargo.toml
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub async fn run(check_only: bool) -> Result<()> {
+pub async fn run(check_only: bool, allow_unsigned: bool) -> Result<()> {
     let current = format!("v{}", CURRENT_VERSION);
     eprintln!("Current version: {}", current.bold());
 
@@ -60,7 +60,7 @@ pub async fn run(check_only: bool) -> Result<()> {
 
     eprintln!("Downloading {}...", asset_name);
 
-    let binary = download_and_extract(asset_url, &asset_name, checksums_url).await?;
+    let binary = download_and_extract(asset_url, &asset_name, checksums_url, allow_unsigned).await?;
 
     let current_exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Cannot determine current executable path: {}", e))?;
@@ -105,11 +105,13 @@ async fn fetch_latest_release() -> Result<GithubRelease> {
     Ok(release)
 }
 
-/// Download .tar.gz archive, verify checksum, extract and return binary bytes
+/// Download .tar.gz archive, verify checksum, extract and return binary bytes.
+/// If checksums.txt is unavailable, the upgrade is aborted unless `allow_unsigned` is true.
 async fn download_and_extract(
     url: &str,
     asset_name: &str,
     checksums_url: Option<&str>,
+    allow_unsigned: bool,
 ) -> Result<Vec<u8>> {
     let client = reqwest::Client::builder()
         .user_agent(format!("forge-cli/{}", CURRENT_VERSION))
@@ -125,15 +127,22 @@ async fn download_and_extract(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read response body: {}", e))?;
 
-    // Verify SHA256 checksum if checksums.txt is available
-    if let Some(checksums_url) = checksums_url {
-        verify_checksum(&client, checksums_url, asset_name, &bytes).await?;
-    } else {
-        eprintln!(
-            "{}",
-            "Warning: checksums.txt not found in release, skipping integrity check"
-                .yellow()
-        );
+    // Verify SHA256 checksum. By default, absence of checksums.txt is a hard error:
+    // this prevents silent MITM / corruption. Use --allow-unsigned to override
+    // (e.g. for offline/private releases that do not publish checksums).
+    match checksums_url {
+        Some(url) => verify_checksum(&client, url, asset_name, &bytes).await?,
+        None if allow_unsigned => {
+            eprintln!(
+                "{}",
+                "Warning: checksums.txt not found; skipping integrity check (--allow-unsigned)"
+                    .yellow()
+            );
+        }
+        None => bail!(
+            "Release has no checksums.txt — refusing to install unverified binary.\n\
+             If this is expected (e.g. private/offline release), re-run with --allow-unsigned."
+        ),
     }
 
     // Decompress: .tar.gz → tar → find "fr" entry

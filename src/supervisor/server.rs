@@ -28,7 +28,10 @@ struct ManagedService {
 
 struct SupervisorState {
     services: HashMap<String, ManagedService>,
-    project: ProjectConfig,
+    /// Shared, read-only project config. `Arc` avoids deep-cloning the full
+    /// config (services, workspace, etc.) for every handle_up/down — which
+    /// scaled linearly with number of services × connections.
+    project: Arc<ProjectConfig>,
     workspace_root: PathBuf,
     log_tx: broadcast::Sender<LogLine>,
     log_buffer: LogBuffer,
@@ -39,10 +42,10 @@ struct SupervisorState {
 
 pub async fn run_server(
     listener: TcpListener,
-    project: ProjectConfig,
+    project: Arc<ProjectConfig>,
     workspace_root: PathBuf,
 ) -> Result<()> {
-    let (log_tx, _) = broadcast::channel::<LogLine>(10000);
+    let (log_tx, _) = broadcast::channel::<LogLine>(crate::log::collector::log_broadcast_capacity());
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let supervisor_port = listener.local_addr()?.port();
     let log_buffer: LogBuffer = Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -188,7 +191,9 @@ async fn handle_connection(
 
 async fn handle_up(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {
     let state_guard = state.lock().await;
-    let project = state_guard.project.clone();
+    // Cheap Arc clone — the Arc refactor replaces a full ProjectConfig deep copy
+    // here (full service map + every ResolvedService) with a refcount bump.
+    let project = Arc::clone(&state_guard.project);
     let workspace_root = state_guard.workspace_root.clone();
     let log_tx = state_guard.log_tx.clone();
     let log_buffer = state_guard.log_buffer.clone();
@@ -403,18 +408,39 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
     }; // lock released here
 
     // Phase 2: kill processes and run down commands sequentially without holding the lock.
+    // Collect any down-cmd failures so `fr down` can surface them to the user
+    // instead of pretending everything succeeded.
+    let mut down_failures: Vec<String> = Vec::new();
     for task in &stop_tasks {
         if let Some(pid) = task.pid {
             let _ = platform::stop_process(pid, task.kill_timeout, task.treekill).await;
         }
         if let Some(cmd) = &task.down_cmd {
             tracing::info!("Running down command for '{}': {}", task.name, cmd);
-            let _ = tokio::process::Command::new("sh")
+            match tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(cmd)
                 .current_dir(&task.svc_dir)
                 .status()
-                .await;
+                .await
+            {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    let code = status
+                        .code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".to_string());
+                    tracing::error!(
+                        "down command for '{}' exited with status {}",
+                        task.name, code
+                    );
+                    down_failures.push(format!("{} (exit {})", task.name, code));
+                }
+                Err(e) => {
+                    tracing::error!("down command for '{}' failed to spawn: {}", task.name, e);
+                    down_failures.push(format!("{} ({})", task.name, e));
+                }
+            }
         }
     }
 
@@ -424,7 +450,14 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
         trigger_shutdown_if_all_stopped(&mut guard);
     }
 
-    Response::Ok
+    if down_failures.is_empty() {
+        Response::Ok
+    } else {
+        Response::Error(format!(
+            "down command failed for: {}",
+            down_failures.join(", ")
+        ))
+    }
 }
 
 async fn handle_restart(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>) -> Response {

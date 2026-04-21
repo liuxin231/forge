@@ -18,10 +18,23 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-
     let cli = cli::Cli::parse();
     let verbose = cli.verbose;
+
+    // Let -v / -vv raise the default log level across every subcommand,
+    // not just `cmd_run`. We only seed a default when the user hasn't
+    // already configured RUST_LOG, so explicit overrides still win.
+    if std::env::var_os("RUST_LOG").is_none() {
+        let level = match verbose {
+            0 => "warn",
+            1 => "info",
+            2 => "debug",
+            _ => "trace",
+        };
+        // SAFETY: set exactly once at startup before any thread reads env.
+        unsafe { std::env::set_var("RUST_LOG", format!("forge_cli={}", level)); }
+    }
+    tracing_subscriber::fmt::init();
 
     if let Some(dir) = &cli.directory {
         std::env::set_current_dir(dir)
@@ -76,14 +89,17 @@ async fn main() -> Result<()> {
         cli::Command::Init { path, name, description, parallel } => {
             init::run(init::InitOptions { path, name, description, parallel })?;
         }
+        cli::Command::Cache { action } => {
+            cmd_cache(action).await?;
+        }
         cli::Command::Uninstall => {
             cmd_uninstall()?;
         }
         cli::Command::Validate { json } => {
             cmd_validate(json)?;
         }
-        cli::Command::Upgrade { check } => {
-            upgrade::run(check).await?;
+        cli::Command::Upgrade { check, allow_unsigned } => {
+            upgrade::run(check, allow_unsigned).await?;
         }
         cli::Command::Supervisor { workspace_root } => {
             supervisor::daemon::run_as_daemon(&workspace_root).await?;
@@ -155,15 +171,26 @@ async fn cmd_up(targets: Vec<String>, attach: Option<Vec<String>>, json: bool) -
 
                     match response {
                         Response::Services(statuses) => {
+                            let mut failed = Vec::new();
                             for s in &statuses {
                                 match s.health {
                                     supervisor::protocol::HealthStatus::Healthy => {
                                         list.set_healthy(&s.name, s.port);
                                     }
-                                    _ => list.set_unhealthy(&s.name),
+                                    _ => {
+                                        list.set_unhealthy(&s.name);
+                                        failed.push(s.name.clone());
+                                    }
                                 }
                             }
                             list.render();
+                            if !failed.is_empty() {
+                                list.print_summary("up");
+                                anyhow::bail!(
+                                    "Service(s) failed to become healthy: {}. Dependent services will not be started.",
+                                    failed.join(", ")
+                                );
+                            }
                         }
                         Response::Error(e) => {
                             for name in level {
@@ -456,6 +483,34 @@ async fn cmd_run(
         },
     )
     .await
+}
+
+async fn cmd_cache(action: cli::CacheAction) -> Result<()> {
+    use colored::Colorize;
+
+    let workspace_root = find_workspace_root()?;
+    let project = config::load_project(&workspace_root)?;
+    let cache_root = cache::cache_root(&workspace_root);
+
+    match action {
+        cli::CacheAction::Clear { service: None } => {
+            cache::clear(&cache_root, None)?;
+            eprintln!("{} Cleared cache at {}", "✓".green().bold(), cache_root.display());
+        }
+        cli::CacheAction::Clear { service: Some(target) } => {
+            // Resolve to concrete service names so "gateway/*" works as expected.
+            let resolved = resolver::resolve_targets(&project, &[target.clone()])?;
+            if resolved.is_empty() {
+                anyhow::bail!("No services matched '{}'", target);
+            }
+            for name in &resolved {
+                cache::clear(&cache_root, Some(name))?;
+                eprintln!("{} Cleared cache for {}", "✓".green().bold(), name);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_uninstall() -> Result<()> {

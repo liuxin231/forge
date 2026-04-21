@@ -95,7 +95,7 @@ fn write_pid_file(workspace_root: &Path, service_name: &str, pid: u32) -> Result
     std::fs::create_dir_all(&pid_dir)?;
     let safe_name = sanitize_service_name(service_name);
     let pid_file = pid_dir.join(format!("{}.pid", safe_name));
-    std::fs::write(&pid_file, pid.to_string())?;
+    atomic_write_string(&pid_file, &pid.to_string())?;
     Ok(())
 }
 
@@ -105,6 +105,34 @@ pub fn remove_pid_file(workspace_root: &Path, service_name: &str) {
     if let Err(e) = std::fs::remove_file(&pid_file) {
         tracing::debug!("Could not remove PID file {}: {}", pid_file.display(), e);
     }
+}
+
+/// Write `content` to `path` atomically: write to a sibling temp file then rename.
+/// This guarantees readers never see a half-written file, even if the writer
+/// crashes mid-write. Falls back to direct write if the temp/rename path fails
+/// (e.g. read-only tmpfs) only after reporting the error.
+pub(crate) fn atomic_write_string(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine parent of {}", path.display()))?;
+    // Include writer PID in the temp name to avoid collisions between concurrent writers.
+    let tmp_name = match path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => format!(".{}.{}.tmp", n, std::process::id()),
+        None => format!(".atomic.{}.tmp", std::process::id()),
+    };
+    let tmp = parent.join(tmp_name);
+    std::fs::write(&tmp, content)
+        .map_err(|e| anyhow::anyhow!("Failed to write temp file {}: {}", tmp.display(), e))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::anyhow!(
+            "Failed to rename {} to {}: {}",
+            tmp.display(),
+            path.display(),
+            e
+        ));
+    }
+    Ok(())
 }
 
 /// Shell-like word splitting with basic quoting support.

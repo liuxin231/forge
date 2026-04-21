@@ -59,17 +59,32 @@ pub async fn wait_healthy(
             port_hint
         };
 
-        let healthy = if let Some(http_path) = &health.http {
-            check_http(effective_port, http_path).await
-        } else if let Some(cmd) = &health.cmd {
-            check_cmd(cmd, cwd).await
-        } else {
-            // No check configured — validation should catch this,
-            // but treat as healthy to avoid blocking
-            true
-        };
+        let healthy = probe_once(health, effective_port, cwd).await;
 
         if healthy {
+            // TOCTOU guard: for HTTP checks, confirm the port we just probed
+            // is still owned by the same PID we started. Between port lookup
+            // and response arrival the service could have exited and something
+            // else (another dev server, a sidecar, even the supervisor
+            // looping) could have bound the port — without this check we'd
+            // report the wrong service as healthy on the wrong port.
+            if health.http.is_some() {
+                if let (Some(p), Some(port)) = (pid, effective_port) {
+                    let still_ours = crate::process::platform::detect_listening_ports(p)
+                        .into_iter()
+                        .any(|owned| owned == port);
+                    if !still_ours {
+                        tracing::warn!(
+                            "'{}' port {} no longer owned by PID {} after health probe; retrying",
+                            service_name,
+                            port,
+                            p
+                        );
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    }
+                }
+            }
             tracing::info!("'{}' is healthy", service_name);
             // For HTTP checks return the port we actually connected to so callers
             // can display it without re-running port detection.
@@ -156,6 +171,25 @@ async fn check_cmd(cmd: &crate::config::service::HealthCmd, cwd: &std::path::Pat
     }
 }
 
+/// Run one probe against `health`: HTTP if configured, else cmd, else treat as healthy.
+/// Extracted so `wait_healthy` (retry loop) and `check_health_once` (single-shot
+/// from `ps`) share one definition of "what does a healthy probe look like".
+async fn probe_once(
+    health: &crate::config::service::HealthConfig,
+    port: Option<u16>,
+    cwd: &std::path::Path,
+) -> bool {
+    if let Some(http_path) = &health.http {
+        check_http(port, http_path).await
+    } else if let Some(cmd) = &health.cmd {
+        check_cmd(cmd, cwd).await
+    } else {
+        // No check configured — validation should catch this,
+        // but treat as healthy to avoid blocking.
+        true
+    }
+}
+
 /// Perform a single health check (no retries, no timeout loop).
 /// Returns true if healthy, false otherwise.
 pub async fn check_health_once(
@@ -163,17 +197,9 @@ pub async fn check_health_once(
     health: &Option<crate::config::service::HealthConfig>,
     cwd: &std::path::Path,
 ) -> bool {
-    let health = match health {
-        Some(h) => h,
-        None => return true, // no health check configured = healthy
-    };
-
-    if let Some(http_path) = &health.http {
-        check_http(port, http_path).await
-    } else if let Some(cmd) = &health.cmd {
-        check_cmd(cmd, cwd).await
-    } else {
-        true
+    match health {
+        Some(h) => probe_once(h, port, cwd).await,
+        None => true, // no health check configured = healthy
     }
 }
 

@@ -4,10 +4,11 @@
 # ============================================================================
 #
 # 用法：
-#   ./install.sh                安装（自动选择最佳方式）
-#   ./install.sh --build        强制从源码构建安装（需要 Rust）
-#   ./install.sh --uninstall    卸载
-#   ./install.sh --check        检查安装状态
+#   ./install.sh                    安装（自动选择最佳方式）
+#   ./install.sh --build            强制从源码构建安装（需要 Rust）
+#   ./install.sh --uninstall        卸载
+#   ./install.sh --check            检查安装状态
+#   ./install.sh --allow-unsigned   允许无 checksums.txt 的 release 安装（不安全）
 #
 # 安装策略（按优先级）：
 #   1. GitHub Releases 下载预编译二进制（需要网络）
@@ -33,6 +34,10 @@ MIN_DISK_MB=100
 GITHUB_REPO="liuxin231/forge"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES="https://github.com/${GITHUB_REPO}/releases"
+
+# Integrity policy: require checksums.txt unless user explicitly opts out.
+# Also honors env var FORGE_ALLOW_UNSIGNED=1 for CI/non-interactive use.
+ALLOW_UNSIGNED="${FORGE_ALLOW_UNSIGNED:-0}"
 
 # ─── 颜色（自动检测终端能力） ──────────────────────────────────────────────
 
@@ -173,8 +178,8 @@ download_from_github() {
         return 1
     fi
 
-    # 校验 checksum（如有 checksums.txt）
-    verify_checksum_if_available "$latest_json" "$DOWNLOAD_TMP_DIR" "$asset_name" "$tmp_archive"
+    # 校验 checksum（必须存在，除非 --allow-unsigned）
+    verify_checksum "$latest_json" "$DOWNLOAD_TMP_DIR" "$asset_name" "$tmp_archive"
 
     # 解压
     tar -xzf "$tmp_archive" -C "$DOWNLOAD_TMP_DIR"
@@ -191,9 +196,23 @@ download_from_github() {
     INSTALLED_VERSION="$tag"
 }
 
-# ─── Checksum 校验 ────────────────────────────────────────────────────────
+# ─── Checksum 校验（默认严格：缺失即失败，除非 --allow-unsigned） ─────────
 
-verify_checksum_if_available() {
+# Hard-fail helper: either abort (strict) or warn + continue (allow_unsigned).
+# All call sites below funnel through this so behavior stays consistent.
+checksum_violation() {
+    local msg="$1" tmp_dir="$2"
+    if [[ "$ALLOW_UNSIGNED" == "1" ]]; then
+        warn "$msg (continuing with --allow-unsigned)"
+        return 0
+    fi
+    err "$msg"
+    err "Refusing to install unverified binary. Re-run with --allow-unsigned to override."
+    [[ -n "$tmp_dir" && -d "$tmp_dir" ]] && rm -rf "$tmp_dir"
+    exit 1
+}
+
+verify_checksum() {
     local release_json="$1" tmp_dir="$2" asset_name="$3" archive_path="$4"
 
     # 需要 sha256sum 或 shasum
@@ -203,7 +222,7 @@ verify_checksum_if_available() {
     elif command -v shasum &>/dev/null; then
         sha_cmd="shasum -a 256"
     else
-        warn "sha256sum/shasum not found, skipping checksum verification"
+        checksum_violation "sha256sum/shasum not found; cannot verify download integrity" "$tmp_dir"
         return 0
     fi
 
@@ -213,13 +232,13 @@ verify_checksum_if_available() {
         | sed 's/.*"browser_download_url": *"\([^"]*\)".*/\1/')
 
     if [[ -z "$checksums_url" ]]; then
-        warn "checksums.txt not found in release, skipping integrity check"
+        checksum_violation "checksums.txt not found in release" "$tmp_dir"
         return 0
     fi
 
     local checksums_file="$tmp_dir/checksums.txt"
     if ! http_download "$checksums_url" "$checksums_file" 2>/dev/null; then
-        warn "Failed to download checksums.txt, skipping integrity check"
+        checksum_violation "Failed to download checksums.txt from release" "$tmp_dir"
         return 0
     fi
 
@@ -228,7 +247,7 @@ verify_checksum_if_available() {
     expected_hash=$(grep "$asset_name" "$checksums_file" | awk '{print $1}')
 
     if [[ -z "$expected_hash" ]]; then
-        warn "No checksum entry for $asset_name, skipping integrity check"
+        checksum_violation "No checksum entry for $asset_name in checksums.txt" "$tmp_dir"
         return 0
     fi
 
@@ -299,7 +318,24 @@ build_from_source() {
         case "${choice}" in
             1)
                 info "Installing Rust via rustup..."
-                if curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; then
+                # Download rustup-init to a temp file first, then execute.
+                # Avoids the classic `curl | sh` hazard where a truncated
+                # response (network drop mid-stream) leaves the shell
+                # executing half a script.
+                local rustup_tmp
+                rustup_tmp=$(mktemp -t rustup-init.XXXXXX.sh)
+                # shellcheck disable=SC2064
+                trap "rm -f '$rustup_tmp'" EXIT
+                if ! curl --proto '=https' --tlsv1.2 --fail -sSo "$rustup_tmp" \
+                        https://sh.rustup.rs; then
+                    err "Failed to download rustup installer"
+                    exit 1
+                fi
+                if [[ ! -s "$rustup_tmp" ]]; then
+                    err "Downloaded rustup installer is empty — aborting"
+                    exit 1
+                fi
+                if sh "$rustup_tmp" -y; then
                     # shellcheck disable=SC1091
                     source "$HOME/.cargo/env"
                     ok "Rust installed: $(cargo --version)"
@@ -573,7 +609,20 @@ do_check() {
 
 # ─── 入口 ───────────────────────────────────────────────────────────────────
 
-case "${1:-}" in
+# Parse flags that can appear before/alongside the primary subcommand.
+# Currently we only support --allow-unsigned; everything else is a subcommand.
+ACTION=""
+for arg in "$@"; do
+    case "$arg" in
+        --allow-unsigned) ALLOW_UNSIGNED=1 ;;
+        --build|-b|--uninstall|-u|--check|-c|--help|-h|"")
+            [[ -z "$ACTION" ]] && ACTION="$arg"
+            ;;
+        *) err "Unknown option: $arg (try --help)"; exit 1 ;;
+    esac
+done
+
+case "$ACTION" in
     --build|-b)     do_install --build ;;
     --uninstall|-u) do_uninstall ;;
     --check|-c)     do_check ;;
@@ -586,6 +635,7 @@ case "${1:-}" in
         echo "  --build,  -b      Force build from source (requires Rust)"
         echo "  --check,  -c      Check install status and latest release"
         echo "  --uninstall, -u   Remove fr"
+        echo "  --allow-unsigned  Proceed even if checksums.txt is missing (insecure)"
         echo "  --help,   -h      Show this help"
         echo ""
         echo "Install strategy (in order):"
@@ -596,11 +646,12 @@ case "${1:-}" in
         echo "  5. cargo build --release                  (build from source)"
         echo ""
         echo "Environment:"
-        echo "  FORGE_HOME    Install root (default: ~/.forge)"
+        echo "  FORGE_HOME              Install root (default: ~/.forge)"
+        echo "  FORGE_ALLOW_UNSIGNED=1  Equivalent to --allow-unsigned"
         echo ""
         echo "Rollback:"
         echo "  cp ~/.forge/backup/fr.<timestamp>.bak ~/.forge/bin/fr"
         ;;
     "")             do_install ;;
-    *)              err "Unknown option: $1 (try --help)"; exit 1 ;;
+    *)              err "Unknown option: $ACTION (try --help)"; exit 1 ;;
 esac
