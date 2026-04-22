@@ -417,9 +417,7 @@ async fn handle_down(services: Vec<String>, state: &Arc<Mutex<SupervisorState>>)
         }
         if let Some(cmd) = &task.down_cmd {
             tracing::info!("Running down command for '{}': {}", task.name, cmd);
-            match tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
+            match crate::process::shell::tokio_shell(cmd)
                 .current_dir(&task.svc_dir)
                 .status()
                 .await

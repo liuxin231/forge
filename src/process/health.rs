@@ -137,8 +137,7 @@ async fn check_cmd(cmd: &crate::config::service::HealthCmd, cwd: &std::path::Pat
             if s.trim().is_empty() {
                 return false;
             }
-            tokio::process::Command::new("sh")
-                .args(["-c", s])
+            crate::process::shell::tokio_shell(s)
                 .current_dir(cwd)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())

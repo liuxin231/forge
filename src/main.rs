@@ -597,8 +597,7 @@ async fn cmd_exec(service: &str, cmd: Vec<String>) -> Result<()> {
     };
 
     let cmd_str = cmd.join(" ");
-    let status = tokio::process::Command::new("sh")
-        .args(["-c", &cmd_str])
+    let status = crate::process::shell::tokio_shell(&cmd_str)
         .current_dir(&cwd)
         .envs(&svc.config.env)
         .stdout(std::process::Stdio::inherit())

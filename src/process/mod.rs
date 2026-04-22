@@ -2,6 +2,7 @@ pub mod health;
 pub mod platform;
 pub mod restart;
 pub mod runner;
+pub mod shell;
 
 use crate::config::ProjectConfig;
 use anyhow::{bail, Result};

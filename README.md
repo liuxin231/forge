@@ -118,7 +118,7 @@ forge 的处理：`fr up / down / restart / logs / ps / run <cmd>` 是统一的�
 
 ## 安装
 
-### 一键安装（推荐）
+### macOS / Linux —— 一键安装（推荐）
 
 从 GitHub Releases 下载预编译二进制，无需 Rust：
 
@@ -126,9 +126,44 @@ forge 的处理：`fr up / down / restart / logs / ps / run <cmd>` 是统一的�
 curl -fsSL https://raw.githubusercontent.com/liuxin231/forge/main/install.sh | bash
 ```
 
-支持平台：macOS（Intel / Apple Silicon）、Linux（x86_64 / aarch64）
+支持架构：macOS（Intel / Apple Silicon）、Linux（x86_64 / aarch64）。安装位置 `~/.forge/bin/fr`，脚本自动配置 PATH。
 
-安装位置：`~/.forge/bin/fr`，脚本自动配置 PATH。
+### Windows
+
+暂无一键脚本，首次手动装一次，之后 `fr upgrade` 即可自更新：
+
+```powershell
+# 1. 下载并解压（Windows 10+ 自带 tar）
+Invoke-WebRequest `
+  -Uri "https://github.com/liuxin231/forge/releases/latest/download/fr-x86_64-pc-windows-msvc.tar.gz" `
+  -OutFile fr.tar.gz
+tar -xzf fr.tar.gz
+
+# 2. 放到 ~/.forge/bin 并加入用户 PATH
+$forgeBin = "$env:USERPROFILE\.forge\bin"
+New-Item -ItemType Directory -Force -Path $forgeBin | Out-Null
+Move-Item -Force fr.exe "$forgeBin\fr.exe"
+[Environment]::SetEnvironmentVariable(
+  "Path",
+  [Environment]::GetEnvironmentVariable("Path", "User") + ";$forgeBin",
+  "User"
+)
+
+# 3. 重开终端后验证
+fr --version
+```
+
+> Windows 下 `up`/`down`/`health.cmd`/`fr run` 的命令字符串走 `cmd /C` 执行。`&&` 能用，取变量写 `%VAR%`（不是 `$VAR`）。想用 PowerShell 执行，把命令包成 `powershell -Command "..."`。
+
+### 从源码构建（任何平台，需要 Rust 1.82+）
+
+```bash
+git clone https://github.com/liuxin231/forge.git
+cd forge
+cargo install --path .
+```
+
+二进制装到 `~/.cargo/bin/fr`（Unix）或 `%USERPROFILE%\.cargo\bin\fr.exe`（Windows），rustup 已把该目录加入 PATH。
 
 ### 升级
 
@@ -137,20 +172,7 @@ fr upgrade          # 升级到最新版本
 fr upgrade --check  # 仅检查是否有新版本，不安装
 ```
 
-### 从源码构建（需要 Rust 1.82+）
-
-```bash
-git clone https://github.com/liuxin231/forge.git
-cd forge
-cargo install --path .
-```
-
-### 手动构建
-
-```bash
-cargo build --release
-cp target/release/fr ~/.local/bin/
-```
+macOS / Linux / Windows 全平台可用。Windows 下会把正在运行的 `fr.exe` 移到同目录 `.fr.old.<pid>` 后再原子替换，升级失败会自动回滚。
 
 ### 验证
 

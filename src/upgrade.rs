@@ -145,7 +145,7 @@ async fn download_and_extract(
         ),
     }
 
-    // Decompress: .tar.gz → tar → find "fr" entry
+    // Decompress: .tar.gz → tar → find "fr" or "fr.exe" entry
     use std::io::Read;
     let gz = flate2::read::GzDecoder::new(bytes.as_ref());
     let mut archive = tar::Archive::new(gz);
@@ -158,7 +158,7 @@ async fn download_and_extract(
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        if name == "fr" {
+        if name == "fr" || name == "fr.exe" {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             return Ok(buf);
@@ -265,11 +265,67 @@ fn atomic_replace(current_exe: &std::path::Path, new_bytes: &[u8]) -> Result<()>
             .map_err(|e| anyhow::anyhow!("Failed to set permissions: {}", e))?;
     }
 
-    // Atomic rename
-    std::fs::rename(&tmp_path, current_exe).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp_path);
+    install_binary(&tmp_path, current_exe)?;
+
+    Ok(())
+}
+
+/// Move `tmp_path` into `current_exe`. On Unix this is a simple atomic rename.
+/// On Windows, rename can't overwrite an executable that's currently mapped into
+/// the running process — but it *can* move that executable aside. So we first
+/// rename the running binary to a sibling `.old` name, then rename the new
+/// binary into place. The `.old` file can't be deleted while still in use;
+/// best-effort cleanup handles the case where it can (e.g. next upgrade).
+#[cfg(not(windows))]
+fn install_binary(tmp_path: &std::path::Path, current_exe: &std::path::Path) -> Result<()> {
+    std::fs::rename(tmp_path, current_exe).map_err(|e| {
+        let _ = std::fs::remove_file(tmp_path);
         anyhow::anyhow!("Failed to replace binary (try sudo?): {}", e)
-    })?;
+    })
+}
+
+#[cfg(windows)]
+fn install_binary(tmp_path: &std::path::Path, current_exe: &std::path::Path) -> Result<()> {
+    let parent = current_exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine parent directory of executable"))?;
+
+    // Clean up any leftover .old files from previous upgrades that weren't in use.
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with(".fr.old.")
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    if current_exe.exists() {
+        let old_path = parent.join(format!(".fr.old.{}", std::process::id()));
+        // Stale .old with our PID shouldn't exist, but guard anyway.
+        let _ = std::fs::remove_file(&old_path);
+
+        std::fs::rename(current_exe, &old_path).map_err(|e| {
+            let _ = std::fs::remove_file(tmp_path);
+            anyhow::anyhow!("Failed to move running binary aside: {}", e)
+        })?;
+
+        if let Err(e) = std::fs::rename(tmp_path, current_exe) {
+            // Restore the original so the user isn't left without a working binary.
+            let _ = std::fs::rename(&old_path, current_exe);
+            let _ = std::fs::remove_file(tmp_path);
+            return Err(anyhow::anyhow!("Failed to install new binary: {}", e));
+        }
+
+        // The old binary is still mapped by this process; deletion is best-effort.
+        let _ = std::fs::remove_file(&old_path);
+    } else {
+        std::fs::rename(tmp_path, current_exe).map_err(|e| {
+            let _ = std::fs::remove_file(tmp_path);
+            anyhow::anyhow!("Failed to install new binary: {}", e)
+        })?;
+    }
 
     Ok(())
 }
@@ -299,19 +355,14 @@ fn detect_platform() -> Result<String> {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
-    let os_part = match os {
-        "macos" => "apple-darwin",
-        "linux" => "unknown-linux-gnu",
-        other => bail!("Unsupported OS: {}", other),
-    };
-
-    let arch_part = match arch {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        other => bail!("Unsupported architecture: {}", other),
-    };
-
-    Ok(format!("{}-{}", arch_part, os_part))
+    match (os, arch) {
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin".to_string()),
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin".to_string()),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu".to_string()),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu".to_string()),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc".to_string()),
+        (os, arch) => bail!("Unsupported platform: {}-{}", arch, os),
+    }
 }
 
 #[derive(serde::Deserialize)]
