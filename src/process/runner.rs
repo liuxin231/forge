@@ -49,11 +49,8 @@ async fn build_command(svc: &ResolvedService, _workspace_root: &Path) -> Result<
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Service '{}' has no 'up' field", svc.name))?;
 
-    #[cfg(windows)]
-    return Ok(("cmd".to_string(), vec!["/C".to_string(), up_cmd.clone()]));
-
-    #[cfg(not(windows))]
-    Ok(("sh".to_string(), vec!["-c".to_string(), up_cmd.clone()]))
+    let (prog, args) = crate::process::shell::shell_invocation(up_cmd);
+    Ok((prog.to_string(), args.to_vec()))
 }
 
 fn get_working_dir(svc: &ResolvedService) -> Result<std::path::PathBuf> {

@@ -57,8 +57,7 @@ async fn execute_direct_command(
         eprintln!("{} {}", "Running:".bold(), run_cmd);
     }
 
-    let status = tokio::process::Command::new("sh")
-        .args(["-c", run_cmd])
+    let status = crate::process::shell::tokio_shell(run_cmd)
         .current_dir(&project.root)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -338,8 +337,7 @@ async fn run_service_command(
                 eprintln!("  {} {}", "▶".dimmed(), cmd_str);
             }
             let cwd = resolve_cwd(svc);
-            let status = tokio::process::Command::new("sh")
-                .args(["-c", &cmd_str])
+            let status = crate::process::shell::tokio_shell(&cmd_str)
                 .current_dir(&cwd)
                 .envs(&svc.config.env)
                 .stdout(Stdio::inherit())
@@ -368,8 +366,7 @@ async fn run_service_command(
                 eprintln!("  {} {}", "▶".dimmed(), cmd_str);
             }
             let cwd = resolve_cwd(svc);
-            let status = tokio::process::Command::new("sh")
-                .args(["-c", &cmd_str])
+            let status = crate::process::shell::tokio_shell(&cmd_str)
                 .current_dir(&cwd)
                 .envs(&svc.config.env)
                 .stdout(Stdio::inherit())
